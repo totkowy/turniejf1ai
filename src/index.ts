@@ -8,7 +8,9 @@ const MEDIA_DIRECTION_MODEL = "@cf/zai-org/glm-4.7-flash";
 const MEDIA_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "3.3-real-ai-images";
+const VERSION = "3.4-strict-f1-photo-director";
+const MEDIA_PROMPT_REVISION = "news-v34";
+const MEDIA_GUIDANCE = "4.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -225,20 +227,162 @@ function deterministicSeed(hash: string): number {
 
 function teamLiveryDescription(team: string): string {
   const key = clean(team, 80).toUpperCase().replace(/\s+/g, " ");
-  if (!key) return "neutral dark graphite with subtle red accents";
-  if (key.includes("MCLAREN")) return "papaya orange and black";
-  if (key.includes("FERRARI")) return "scarlet racing red with restrained black accents";
-  if (key.includes("RED BULL") || key.includes("REDBULL")) return "deep navy blue with vivid red and yellow accents";
-  if (key.includes("MERCEDES")) return "metallic silver and black with turquoise accents";
-  if (key.includes("ASTON")) return "British racing green with lime accents";
-  if (key.includes("ALPINE")) return "deep blue with pink accents";
-  if (key.includes("WILLIAMS")) return "bright royal blue with white accents";
-  if (key.includes("HAAS")) return "white, black and red";
-  if (key.includes("RACING BULL") || key === "RB") return "white and dark navy with blue accents";
-  if (key.includes("SAUBER")) return "black with vivid electric green accents";
-  if (key.includes("AUDI")) return "black, graphite and deep red";
-  if (key.includes("CADILLAC")) return "black, white and metallic silver";
-  return "distinctive professional racing colors matching the supplied team identity";
+  if (!key) return "neutral dark graphite with restrained red accents";
+  if (key.includes("MCLAREN")) return "McLaren-inspired papaya orange and deep black, with tiny cool-blue accents only if needed";
+  if (key.includes("FERRARI")) return "Ferrari-inspired rich scarlet racing red with restrained black and subtle white details";
+  if (key.includes("RED BULL") || key.includes("REDBULL")) return "Red Bull-inspired deep navy blue with vivid red accents and small yellow highlights";
+  if (key.includes("MERCEDES")) return "Mercedes-inspired metallic silver and black with turquoise accents";
+  if (key.includes("ASTON")) return "Aston Martin-inspired British racing green with restrained lime accents";
+  if (key.includes("ALPINE")) return "Alpine-inspired deep blue with restrained pink accents";
+  if (key.includes("WILLIAMS")) return "Williams-inspired royal blue and navy with clean white accents";
+  if (key.includes("HAAS")) return "Haas-inspired white, black and restrained red";
+  if (key.includes("RACING BULL") || key === "RB") return "Racing Bulls-inspired white and dark navy with blue accents";
+  if (key.includes("SAUBER")) return "Sauber-inspired black with vivid electric green accents";
+  if (key.includes("AUDI")) return "Audi-inspired black, graphite and deep red";
+  if (key.includes("CADILLAC")) return "Cadillac-inspired black, white and metallic silver";
+  return "professional top-tier Grand Prix racing colors matching the supplied team identity";
+}
+
+type MediaSceneType = "single_driver" | "driver_rivalry" | "single_car" | "two_car_duel" | "team_cars";
+type DriverTeamPair = { name: string; team: string };
+
+function stableBucket(value: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < value.length; i++) {
+    h ^= value.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h % 100;
+}
+
+function normalizeSceneType(value: unknown): MediaSceneType | "" {
+  const v = clean(value, 40).toLowerCase();
+  if (["single_driver", "driver_rivalry", "single_car", "two_car_duel", "team_cars"].includes(v)) return v as MediaSceneType;
+  return "";
+}
+
+function resolveSceneType(input: {
+  title: string;
+  text: string;
+  category: string;
+  family: string;
+  people: string[];
+  teams: string[];
+  requested?: unknown;
+}): MediaSceneType {
+  const requested = normalizeSceneType(input.requested);
+  const peopleCount = input.people.length;
+  const teamCount = input.teams.length;
+  const story = clean(`${input.family} ${input.category} ${input.title} ${input.text}`, 1800).toLowerCase();
+  const bucket = stableBucket(`${input.family}|${input.title}|${input.people.join("|")}|${input.teams.join("|")}`);
+  const onTrack = /(walka|pojedynek|duel|battle|różnic|roznic|swing|dogoni|atak|wyprzed|koło w koło|kolo w kolo|p10|p9|p8|p7|p6|p5|p4|gap)/i.test(story);
+  const humanStory = /(mistrz|tytuł|tytul|lider|presj|forma|zagroż|zagroz|elimin|rekord|awans|spad|momentum|podium|bohater)/i.test(story);
+
+  if (peopleCount >= 2) {
+    if (requested === "driver_rivalry" || requested === "two_car_duel") return requested;
+    if (onTrack && !humanStory) return "two_car_duel";
+    if (humanStory && !onTrack) return "driver_rivalry";
+    return bucket < 48 ? "driver_rivalry" : "two_car_duel";
+  }
+  if (peopleCount === 1) {
+    if (requested === "single_driver" || requested === "single_car") return requested;
+    if (humanStory) return "single_driver";
+    if (onTrack) return "single_car";
+    return bucket < 58 ? "single_driver" : "single_car";
+  }
+  if (teamCount >= 2) return "two_car_duel";
+  if (teamCount === 1) return requested === "single_car" ? "single_car" : "team_cars";
+  return "single_car";
+}
+
+function driverTeamLookup(driverTeams: DriverTeamPair[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const pair of driverTeams) {
+    const name = clean(pair?.name, 80).toLowerCase();
+    const team = clean(pair?.team, 80);
+    if (name && team) map.set(name, team);
+  }
+  return map;
+}
+
+function subjectTeam(input: { people: string[]; teams: string[]; driverTeams: DriverTeamPair[] }, index: number): string {
+  const person = clean(input.people[index], 80);
+  const lookup = driverTeamLookup(input.driverTeams);
+  if (person) {
+    const mapped = lookup.get(person.toLowerCase());
+    if (mapped) return mapped;
+  }
+  return clean(input.teams[index] || (index === 0 ? input.teams[0] : ""), 80);
+}
+
+function sceneInstructions(sceneType: MediaSceneType, input: {
+  people: string[];
+  teams: string[];
+  driverTeams: DriverTeamPair[];
+}): string[] {
+  const person1 = clean(input.people[0], 80) || "the primary league driver";
+  const person2 = clean(input.people[1], 80) || "the second rival driver";
+  const team1 = subjectTeam(input, 0) || clean(input.teams[0], 80);
+  const team2 = subjectTeam(input, 1) || clean(input.teams[1], 80);
+  const livery1 = teamLiveryDescription(team1);
+  const livery2 = teamLiveryDescription(team2);
+  const mapping: string[] = [];
+  if (input.people[0] && team1) mapping.push(`SUBJECT MAPPING — ${person1} belongs to ${team1}: use ${livery1}. This mapping is mandatory.`);
+  if (input.people[1] && team2) mapping.push(`SUBJECT MAPPING — ${person2} belongs to ${team2}: use ${livery2}. This mapping is mandatory and MUST NOT be swapped with subject 1.`);
+
+  if (sceneType === "driver_rivalry") {
+    return [
+      ...mapping,
+      "SCENE: premium championship-rivalry paddock photograph.",
+      "Show EXACTLY TWO foreground racing drivers, no more and no fewer. Both are adult professional Grand Prix drivers, seen from behind or from a restrained 3/4 rear angle, walking side-by-side through the paddock or pit lane.",
+      `Driver 1 visually represents ${person1}${team1 ? ` / ${team1}` : ""} and wears a race suit dominated by ${livery1}.`,
+      `Driver 2 visually represents ${person2}${team2 ? ` / ${team2}` : ""} and wears a race suit dominated by ${livery2}.`,
+      "The two suits must be clearly different and correctly assigned; NEVER swap their team colors.",
+      "Keep faces non-identifiable; helmets may be worn. No readable driver names, numbers or sponsor logos.",
+      "Cars may appear only softly in the background and must not obscure the two drivers. No extra foreground mechanics or third featured driver.",
+      "Mood: elite championship tension, serious and believable, like a premium motorsport magazine photograph."
+    ];
+  }
+  if (sceneType === "two_car_duel") {
+    return [
+      ...mapping,
+      "SCENE: realistic wheel-to-wheel Grand Prix battle on a proper racing circuit.",
+      "Show EXACTLY TWO complete modern 2026-era Formula One-style single-seater cars as the featured subjects. Do not merge the cars and do not add a third featured car.",
+      `Car 1 represents ${person1}${team1 ? ` / ${team1}` : ""}: its livery must be ${livery1}.`,
+      `Car 2 represents ${person2}${team2 ? ` / ${team2}` : ""}: its livery must be ${livery2}.`,
+      "Each car has EXACTLY ONE cockpit, EXACTLY ONE seat, EXACTLY ONE steering wheel and EXACTLY ONE helmeted driver. One human per car, never two people in one cockpit.",
+      "Place the cars side-by-side or nose-to-tail under braking through a realistic medium/high-speed circuit corner, with believable racing lines and separation between vehicles.",
+      "No passenger, no tandem seating, no two-seater, no duplicated helmet, no person sitting behind the driver."
+    ];
+  }
+  if (sceneType === "single_driver") {
+    return [
+      ...mapping,
+      "SCENE: premium single-driver editorial portrait in the paddock or pit lane.",
+      "Show EXACTLY ONE foreground racing driver as the hero subject, adult, athletic, seen from behind or 3/4 rear angle, professional and calm.",
+      `The driver represents ${person1}${team1 ? ` / ${team1}` : ""} and wears a race suit dominated by ${livery1}.`,
+      "Optionally show ONE matching modern Formula One-style car softly in the background. Do not introduce a second featured driver.",
+      "Keep the face non-identifiable; no readable names, numbers or sponsor logos."
+    ];
+  }
+  if (sceneType === "team_cars") {
+    const baseTeam = clean(input.teams[0], 80) || team1;
+    const baseLivery = teamLiveryDescription(baseTeam);
+    return [
+      "SCENE: premium team-performance editorial photograph.",
+      `Feature one or two modern 2026-era Formula One-style cars from ${baseTeam || "the same team"}, consistently using ${baseLivery}.`,
+      "If two cars are shown, each car has EXACTLY ONE cockpit and EXACTLY ONE helmeted driver. Never create a shared or tandem cockpit.",
+      "Keep the composition disciplined and professional, with the same team identity on both cars and no unrelated rival livery dominating the frame."
+    ];
+  }
+  return [
+    ...mapping,
+    "SCENE: premium single-car Grand Prix action photograph.",
+    "Show EXACTLY ONE complete modern 2026-era Formula One-style single-seater as the featured car.",
+    `The car represents ${person1}${team1 ? ` / ${team1}` : ""} and its livery must be ${livery1}.`,
+    "The car has EXACTLY ONE cockpit, EXACTLY ONE seat, EXACTLY ONE steering wheel and EXACTLY ONE helmeted driver.",
+    "No second featured driver, no passenger, no tandem seating and no extra cockpit."
+  ];
 }
 
 function buildNewsPhotoPrompt(input: {
@@ -246,38 +390,49 @@ function buildNewsPhotoPrompt(input: {
   text: string;
   round: string;
   category: string;
+  family: string;
   people: string[];
   teams: string[];
+  driverTeams: DriverTeamPair[];
   tone: string;
+  requestedSceneType?: unknown;
 }) {
-  const teamA = input.teams[0] ? teamLiveryDescription(input.teams[0]) : "";
-  const teamB = input.teams[1] ? teamLiveryDescription(input.teams[1]) : "";
-  const teamLine = teamA && teamB
-    ? `Show two rival fictional single-seat race cars: the first in ${teamA}, the second in ${teamB}.`
-    : teamA
-      ? `Show one leading fictional single-seat race car in ${teamA}.`
-      : "Use believable modern motorsport liveries in dark graphite, red and metallic tones.";
-  const mood = slugTone(input.tone);
-  const sceneHint = mood === "duel"
-    ? "Capture a close wheel-to-wheel battle or overtaking moment."
-    : mood === "alarm"
-      ? "Capture a tense high-pressure racing moment with dramatic braking or a close chase."
-      : mood === "success"
-        ? "Capture a triumphant but realistic racing moment, such as crossing the line or exiting a corner strongly."
-        : "Capture a realistic dynamic race-weekend moment on circuit.";
+  const sceneType = resolveSceneType({
+    title: input.title,
+    text: input.text,
+    category: input.category,
+    family: input.family,
+    people: input.people,
+    teams: input.teams,
+    requested: input.requestedSceneType,
+  });
   const narrative = clean(`${input.title}. ${input.text}`, 420);
+  const scene = sceneInstructions(sceneType, input);
+  const mood = slugTone(input.tone);
+  const moodLine = mood === "alarm"
+    ? "Mood: high pressure and tension, physically believable; no crash unless the story explicitly says so."
+    : mood === "success"
+      ? "Mood: confident and triumphant but documentary, not fantasy."
+      : mood === "duel"
+        ? "Mood: intense elite competition, like a decisive Grand Prix weekend."
+        : "Mood: focused, modern, elite Grand Prix competition.";
+
   return clean([
-    "Photorealistic editorial motorsport photograph for a fictional amateur open-wheel championship in 2026.",
-    "Modern single-seat race cars, realistic carbon fibre, tyres, track surface, safety barriers and grandstands.",
-    teamLine,
-    sceneHint,
-    narrative ? `Story context: ${narrative}` : "",
-    input.round ? `Race-weekend context: ${clean(input.round, 100)}.` : "",
-    "Use a cinematic sports-photography camera angle, realistic motion blur, natural lighting and believable proportions.",
-    "Drivers must remain helmeted and non-identifiable; do not invent recognizable faces.",
-    "ABSOLUTELY NO readable text, letters, numbers, logos, sponsor marks, flags with words, captions, UI, badges or watermarks inside the image.",
-    "The image itself must contain only the scene; website text will be rendered separately."
-  ].filter(Boolean).join(" "), 1500);
+    "PHOTOREALISTIC PREMIUM 2026 FORMULA ONE-STYLE EDITORIAL SPORTS PHOTOGRAPH. It must look like a real current top-tier Grand Prix photograph, never an illustration or junior-series image.",
+    "2026 F1 CAR SHAPE IS MANDATORY: low, wide, long-nose open-wheel single-seater; large slick tyres; halo; carbon-fibre sidepods and floor; sophisticated front wing; large rear wing; exposed suspension; authentic present-day Formula One proportions.",
+    "VEHICLE INTEGRITY: exactly 4 wheels, 1 cockpit, 1 seat, 1 steering wheel and maximum 1 helmeted driver per car. NEVER passenger seat, tandem cockpit, two people in one car, second person behind the driver, duplicate helmet, duplicate torso, extra steering wheel or fused cars.",
+    "FORBIDDEN VEHICLES: go-kart, kart, Formula 2, Formula 3, Formula 4, Formula Ford, IndyCar, vintage Formula car, retro race car, road supercar, prototype, sports car, toy, child-sized car, sci-fi car or two-seater experience car.",
+    ...scene,
+    moodLine,
+    narrative ? `ARTICLE CONTEXT: ${narrative}` : "",
+    input.round ? `RACE CONTEXT: ${clean(input.round, 100)}.` : "",
+    "TEAM COLORS: obey the supplied driver-to-team mapping exactly. Correct team-inspired colors matter more than exact logos. NEVER swap rival colors and never invent a dominant third-team livery.",
+    "PHOTO STYLE: professional motorsport camera, natural perspective, realistic scale and track physics, crisp subject detail, believable reflections, subtle physical motion blur, premium magazine lighting and color grading.",
+    "COMPOSITION: clean wide 2:1 news image. Keep featured subjects center-right/right when practical; preserve calmer negative space on the left for website headlines. Do not crop the key wheels or driver and do not let one oversized subject fill the entire frame.",
+    "HUMAN INTEGRITY: realistic adult anatomy, correct limbs and helmet placement, no duplicate/fused bodies. Foreground driver count must match the scene instruction exactly.",
+    "NO TEXT IN IMAGE: no readable words, names, numbers, team names, sponsor marks, logos, captions, UI, badges, watermarks or pseudo-text. Website text is rendered separately.",
+    "FINAL CHECK: exact subject count, one driver maximum per cockpit, unmistakable 2026 Formula One proportions, correct team-color assignment, realistic anatomy and no forbidden vehicle type."
+  ].filter(Boolean).join(" "), 4000);
 }
 
 const TRACK_SCENES: Record<string, string> = {
@@ -326,6 +481,7 @@ async function fluxImageBytes(env: Env, prompt: string, seedHash: string): Promi
   form.append("prompt", prompt);
   form.append("width", "1024");
   form.append("height", "512");
+  form.append("guidance", MEDIA_GUIDANCE);
   form.append("seed", String(deterministicSeed(seedHash)));
   const formResponse = new Response(form);
   const formStream = formResponse.body;
@@ -527,22 +683,29 @@ async function media(request: Request, env: Env): Promise<Response> {
   const text = clean(event.text, 1000);
   const round = clean(event.round, 180);
   const category = clean(event.category, 80);
+  const family = clean(event.family, 120);
   const truthEvidence = clean(event.truthEvidence, 1400);
   const season = clean(body?.season, 40);
   const people = stringArray(event.people, 6, 80);
   const teams = stringArray(event.teams, 6, 80);
+  const driverTeams: DriverTeamPair[] = Array.isArray(event.driverTeams)
+    ? event.driverTeams.map((x: any) => ({ name: clean(x?.name, 80), team: clean(x?.team, 80) })).filter((x: DriverTeamPair) => x.name && x.team).slice(0, 6)
+    : [];
   const tags = stringArray(event.tags, 8, 60);
   if (!id || !title || !text) return json({ ok: false, error: "Brakuje ID, tytułu albo treści newsa." }, 400);
 
-  const canonical = JSON.stringify({ id, season, title, text, round, category, truthEvidence, people, teams, tags });
+  const canonical = JSON.stringify({ id, season, title, text, round, category, family, truthEvidence, people, teams, driverTeams, tags, mediaPromptRevision: MEDIA_PROMPT_REVISION });
   const sourceHash = await sha256Hex(canonical);
-  const cached = await withCache(request, `media-v33/${sourceHash}`, async () => {
+  const cached = await withCache(request, `media-v34/${sourceHash}`, async () => {
     const system = [
-      "Tworzysz krótką koncepcję grafiki newsowej dla ligi Turniej F1 2026.",
-      "Nie dodawaj żadnych nowych faktów ani liczb.",
-      "Masz przygotować WYŁĄCZNIE zwięzły JSON opisujący kierunek realistycznej fotografii motorsportowej.",
-      "Finalny obraz zostanie wygenerowany osobnym modelem text-to-image i nie może zawierać tekstu.",
-      "Zwróć JSON: {\"strapline\":\"...\",\"focusTitle\":\"...\",\"focus\":[\"...\",\"...\"],\"tone\":\"duel|alarm|success|neutral\"}.",
+      "Jesteś dyrektorem wizualnym profesjonalnego newsroomu ligi Turniej F1 2026.",
+      "Nie ustalasz faktów. Nie dodawaj żadnych nowych nazw, zespołów, torów, wyników ani liczb.",
+      "Masz wybrać sensowny typ realistycznej fotografii, który odpowiada znaczeniu newsa i liczbie bohaterów.",
+      "Dla dwóch rywali wybieraj driver_rivalry albo two_car_duel. Dla jednego kierowcy wybieraj single_driver albo single_car. Dla newsa o jednym zespole bez wskazanego kierowcy możesz wybrać team_cars.",
+      "driver_rivalry oznacza dokładnie dwóch kierowców na pierwszym planie, najlepiej od tyłu/3-4 tyłem w paddocku. two_car_duel oznacza dokładnie dwa osobne bolidy i po jednym kierowcy w każdym kokpicie.",
+      "Preferuj kierowców dla historii o mistrzostwie, liderze, presji, formie i narracji osobowej. Preferuj bolidy dla bezpośredniej walki, różnicy punktowej, ataku, pojedynku i sceny torowej. Zachowuj różnorodność między newsami.",
+      "Finalny model obrazu dostanie osobny bardzo restrykcyjny prompt: nie próbuj dodawać tekstu ani logo do grafiki.",
+      "Zwróć dane przez narzędzie: strapline, focusTitle, focus, tone oraz sceneType.",
       "strapline max 160 znaków, focusTitle max 40 znaków, focus do 2 krótkich haseł.",
     ].join("\n");
     const user = [
@@ -551,8 +714,10 @@ async function media(request: Request, env: Env): Promise<Response> {
       `LEAD: ${text}`,
       `RUNDA: ${round || 'brak'}`,
       `KATEGORIA: ${category || 'news'}`,
+      `RODZINA NEWSA: ${family || 'brak'}`,
       `OSOBY: ${people.join(', ') || 'brak'}`,
       `ZESPOŁY: ${teams.join(', ') || 'brak'}`,
+      `PRZYPISANIE KIEROWCA→ZESPÓŁ: ${driverTeams.map(x=>`${x.name}→${x.team}`).join(' | ') || 'brak'}`,
       `TAGI: ${tags.join(', ') || 'brak'}`,
       `DOWODY: ${truthEvidence || 'brak'}`,
       'Zaproponuj wyłącznie krótki art direction do wizualu newsowego bez dopisywania faktów.',
@@ -574,8 +739,9 @@ async function media(request: Request, env: Env): Promise<Response> {
           focusTitle: { type: "string" },
           focus: { type: "array", items: { type: "string" }, maxItems: 2 },
           tone: { type: "string", enum: ["duel", "alarm", "success", "neutral"] },
+          sceneType: { type: "string", enum: ["single_driver", "driver_rivalry", "single_car", "two_car_duel", "team_cars"] },
         },
-        required: ["strapline", "focusTitle", "focus", "tone"],
+        required: ["strapline", "focusTitle", "focus", "tone", "sceneType"],
       },
       650,
     );
@@ -583,10 +749,11 @@ async function media(request: Request, env: Env): Promise<Response> {
     const focusTitle = clean(parsed?.focusTitle || category || 'Turniej F1', 40);
     const focus = stringArray(parsed?.focus, 2, 34);
     const tone = clean(parsed?.tone || 'neutral', 20).toLowerCase();
+    const sceneType = resolveSceneType({ title, text, category, family, people, teams, requested: parsed?.sceneType });
     const sourceForNumbers = [season, title, text, round, category, truthEvidence, people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
     const outputForNumbers = [strapline, focusTitle, ...focus].join(" ");
     if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error("AI visual próbowało dodać nową liczbę.");
-    const imagePrompt = buildNewsPhotoPrompt({ title, text, round, category, people, teams, tone });
+    const imagePrompt = buildNewsPhotoPrompt({ title, text, round, category, family, people, teams, driverTeams, tone, requestedSceneType: sceneType });
     const imageHash = await sha256Hex(imagePrompt);
     const origin = new URL(request.url).origin;
     const imageDataUri = `${origin}/media/news/${imageHash}.jpg?p=${encodeURIComponent(base64UrlEncodeUtf8(imagePrompt))}`;
@@ -604,6 +771,8 @@ async function media(request: Request, env: Env): Promise<Response> {
         focusTitle,
         focus,
         tone,
+        sceneType,
+        promptRevision: MEDIA_PROMPT_REVISION,
         label: 'AI FOTO • wygenerowane przez AI',
         factsVerifiedBy: 'Truth Guard 2.1',
         source: 'News Engine',
@@ -760,6 +929,8 @@ export default {
         editorialModel: EDITORIAL_MODEL,
         mediaDirectionModel: MEDIA_DIRECTION_MODEL,
         mediaModel: MEDIA_MODEL,
+        mediaPromptRevision: MEDIA_PROMPT_REVISION,
+        mediaGuidance: MEDIA_GUIDANCE,
         analysisModel: ANALYSIS_MODEL,
         aiBinding: Boolean(env.AI),
         endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis','/media/news/:hash.jpg','/media/track-v1/:key.jpg'],
