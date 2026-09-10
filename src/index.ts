@@ -586,12 +586,12 @@ export default {
       }
     }
     try {
-      if (request.method === 'POST' && url.pathname === '/api/editorial') return editorial(request, env);
-      if (request.method === 'POST' && url.pathname === '/api/media') return media(request, env);
-      if (request.method === 'POST' && url.pathname === '/api/analysis') return analysis(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/editorial') return await editorial(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/media') return await media(request, env);
+      if (request.method === 'POST' && url.pathname === '/api/analysis') return await analysis(request, env);
       return json({ ok: false, error: 'Nieznany endpoint.' }, 404);
-    } catch (error) {
-      return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
-    }
+} catch (error) {
+  return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
+}
   },
 } satisfies ExportedHandler<Env>;
