@@ -8,8 +8,8 @@ const MEDIA_DIRECTION_MODEL = "@cf/zai-org/glm-4.7-flash";
 const MEDIA_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "3.4-strict-f1-photo-director";
-const MEDIA_PROMPT_REVISION = "news-v34";
+const VERSION = "3.5-validated-image-pipeline";
+const MEDIA_PROMPT_REVISION = "news-v35";
 const MEDIA_GUIDANCE = "4.0";
 
 const corsHeaders = {
@@ -241,6 +241,134 @@ function teamLiveryDescription(team: string): string {
   if (key.includes("AUDI")) return "Audi-inspired black, graphite and deep red";
   if (key.includes("CADILLAC")) return "Cadillac-inspired black, white and metallic silver";
   return "professional top-tier Grand Prix racing colors matching the supplied team identity";
+}
+
+function teamColorPalette(team: string): string {
+  const key = clean(team, 80).toUpperCase().replace(/\s+/g, " ");
+  if (!key) return "dark graphite with restrained red accents";
+  if (key.includes("MCLAREN")) return "papaya orange and deep black with tiny cool-blue accents";
+  if (key.includes("FERRARI")) return "rich scarlet racing red with restrained black and subtle white details";
+  if (key.includes("RED BULL") || key.includes("REDBULL")) return "deep navy blue with vivid red accents and small yellow highlights";
+  if (key.includes("MERCEDES")) return "metallic silver and black with turquoise accents";
+  if (key.includes("ASTON")) return "British racing green with restrained lime accents";
+  if (key.includes("ALPINE")) return "deep blue with restrained pink accents";
+  if (key.includes("WILLIAMS")) return "royal blue and navy with clean white accents";
+  if (key.includes("HAAS")) return "white, black and restrained red";
+  if (key.includes("RACING BULL") || key === "RB") return "white and dark navy with blue accents";
+  if (key.includes("SAUBER")) return "black with vivid electric green accents";
+  if (key.includes("AUDI")) return "black, graphite and deep red";
+  if (key.includes("CADILLAC")) return "black, white and metallic silver";
+  return "professional dark Grand Prix racing colors with one strong accent color";
+}
+
+type NewsPhotoSpec = {
+  revision: string;
+  sceneType: MediaSceneType;
+  color1: string;
+  color2: string;
+  mood: string;
+};
+
+function buildNewsPhotoSpec(input: {
+  sceneType: MediaSceneType;
+  teams: string[];
+  people: string[];
+  driverTeams: DriverTeamPair[];
+  tone: string;
+}): NewsPhotoSpec {
+  const team1 = subjectTeam(input, 0) || clean(input.teams[0], 80);
+  const team2 = subjectTeam(input, 1) || clean(input.teams[1], 80);
+  return {
+    revision: MEDIA_PROMPT_REVISION,
+    sceneType: input.sceneType,
+    color1: teamColorPalette(team1),
+    color2: teamColorPalette(team2 || team1),
+    mood: slugTone(input.tone),
+  };
+}
+
+function buildPhotoPromptFromSpec(spec: NewsPhotoSpec, compact = false): string {
+  const mood = spec.mood === "alarm" ? "high-pressure competitive tension"
+    : spec.mood === "success" ? "controlled confidence and success"
+    : spec.mood === "duel" ? "intense elite competition"
+    : "focused elite competition";
+  const carCore = compact
+    ? "modern 2026-era top-level Grand Prix open-wheel single-seat race car, low and wide, halo, slick tyres, exposed suspension, sophisticated wings, realistic current proportions"
+    : "modern 2026-era top-level Grand Prix open-wheel single-seat race car: low and wide stance, long nose, halo, large slick tyres, exposed suspension, carbon-fibre floor and sidepods, sophisticated front and rear wings, authentic current-era proportions";
+  const photo = compact
+    ? "photorealistic professional motorsport photograph, natural perspective, believable track physics, clean editorial framing"
+    : "photorealistic premium motorsport editorial photograph, professional long-lens camera, natural perspective, believable scale and track physics, crisp detail, realistic reflections, subtle motion blur, premium magazine color grading";
+
+  const common = [
+    photo,
+    `Visual era: unmistakably current 2026 top-tier Grand Prix racing. Featured cars must match this shape: ${carCore}.`,
+    "Every visible race car is a normal single-seat machine with one cockpit occupied by exactly one helmeted adult driver. Four wheels per car. Distinct separate vehicles and bodies.",
+    "No readable words, names, numbers, sponsor marks, logos, captions, watermarks or UI inside the generated photograph.",
+    "Wide 2:1 composition. Keep the visual clean, physically believable and suitable for a professional news website.",
+    `Mood: ${mood}.`,
+  ];
+
+  let scene: string[] = [];
+  if (spec.sceneType === "driver_rivalry") {
+    scene = [
+      "Show exactly two adult Grand Prix racing drivers as the foreground subjects, seen from behind or restrained 3/4 rear angle, walking side by side through a paddock or pit lane.",
+      `Driver A race suit palette: ${spec.color1}. Driver B race suit palette: ${spec.color2}. Keep the two palettes clearly separated and correctly assigned.`,
+      "Cars, mechanics and spectators may appear only as soft background context; no third foreground driver.",
+    ];
+  } else if (spec.sceneType === "two_car_duel") {
+    scene = [
+      "Show exactly two complete separate modern Grand Prix single-seaters racing wheel-to-wheel through a realistic circuit corner, with believable racing lines and visible separation between both cars.",
+      `Car A livery palette: ${spec.color1}. Car B livery palette: ${spec.color2}. Do not swap the palettes.`,
+      "Each of the two cars has its own single cockpit and one helmeted driver. No passenger, no tandem seating, no merged bodywork, no third featured car.",
+    ];
+  } else if (spec.sceneType === "single_driver") {
+    scene = [
+      "Show exactly one adult Grand Prix racing driver as the foreground hero, seen from behind or 3/4 rear angle in a paddock or pit lane.",
+      `Race suit palette: ${spec.color1}.`,
+      "At most one matching modern single-seater may appear softly in the background. No second featured driver.",
+    ];
+  } else if (spec.sceneType === "team_cars") {
+    scene = [
+      "Show one or two complete modern Grand Prix single-seaters from the same team in a disciplined professional team-performance scene.",
+      `Both cars use the same livery palette: ${spec.color1}.`,
+      "If two cars are visible, each is a separate normal single-seat car with one driver and four wheels.",
+    ];
+  } else {
+    scene = [
+      "Show exactly one complete modern Grand Prix single-seater as the main subject in realistic on-track action.",
+      `Livery palette: ${spec.color1}.`,
+      "One cockpit, one helmeted driver, four wheels, realistic open-wheel proportions.",
+    ];
+  }
+
+  const quality = compact ? [
+    "Avoid unusual vehicle concepts, retro racing cars, junior formulas, karts, road cars and fantasy designs.",
+  ] : [
+    "Quality control: no duplicated helmets, extra occupants, extra wheels, fused cars, malformed suspension, toy-like proportions, retro formula styling, junior-series styling, karts, sports cars or fantasy vehicles.",
+    "For cars, the nose, halo, cockpit, front wing, sidepods, floor, rear wing, suspension and tyre scale must form one coherent physically plausible race car.",
+  ];
+
+  return clean([...common, ...scene, ...quality].join(" "), compact ? 1800 : 3000);
+}
+
+function imageErrorText(error: unknown): string {
+  if (error instanceof Error) return clean(error.message, 800);
+  try { return clean(JSON.stringify(error), 800); } catch { return clean(String(error), 800); }
+}
+
+function isImageSafetyFlag(error: unknown): boolean {
+  const t = imageErrorText(error).toLowerCase();
+  return t.includes("3030") || t.includes("flagged") || t.includes("choose another prompt") || t.includes("safety");
+}
+
+function isImageHardStop(error: unknown): boolean {
+  const t = imageErrorText(error).toLowerCase();
+  return t.includes("3036") || t.includes("daily free allocation") || t.includes("3040") || t.includes("out of capacity") || t.includes("429");
+}
+
+function imageAttemptSeed(seedHash: string, attempt: number): number {
+  const base = deterministicSeed(seedHash);
+  return (base + Math.imul(attempt + 1, 104729)) & 0x7fffffff;
 }
 
 type MediaSceneType = "single_driver" | "driver_rivalry" | "single_car" | "two_car_duel" | "team_cars";
@@ -476,13 +604,13 @@ function buildTrackPhotoPrompt(key: string): string | null {
   ].join(" "), 1200);
 }
 
-async function fluxImageBytes(env: Env, prompt: string, seedHash: string): Promise<Uint8Array> {
+async function fluxImageBytes(env: Env, prompt: string, seedHash: string, attempt = 0): Promise<Uint8Array> {
   const form = new FormData();
   form.append("prompt", prompt);
   form.append("width", "1024");
   form.append("height", "512");
   form.append("guidance", MEDIA_GUIDANCE);
-  form.append("seed", String(deterministicSeed(seedHash)));
+  form.append("seed", String(imageAttemptSeed(seedHash, attempt)));
   const formResponse = new Response(form);
   const formStream = formResponse.body;
   const formContentType = formResponse.headers.get("content-type");
@@ -495,7 +623,56 @@ async function fluxImageBytes(env: Env, prompt: string, seedHash: string): Promi
   } as any);
   const image = typeof result?.image === "string" ? result.image : "";
   if (!image) throw new Error("Model obrazu nie zwrócił danych JPEG.");
-  return base64ToBytes(image);
+  const bytes = base64ToBytes(image);
+  if (bytes.length < 5000) throw new Error("Model obrazu zwrócił nieprawidłowo mało danych obrazu.");
+  return bytes;
+}
+
+async function generateValidatedImage(env: Env, prompts: string[], seedHash: string): Promise<{ bytes: Uint8Array; promptIndex: number; attempt: number }> {
+  const errors: string[] = [];
+  let attempt = 0;
+  for (let promptIndex = 0; promptIndex < prompts.length; promptIndex++) {
+    const prompt = clean(prompts[promptIndex], 3200);
+    const seedsForPrompt = promptIndex === 0 ? 2 : 1;
+    for (let seedTry = 0; seedTry < seedsForPrompt; seedTry++) {
+      try {
+        const bytes = await fluxImageBytes(env, prompt, seedHash, attempt);
+        return { bytes, promptIndex, attempt };
+      } catch (error) {
+        const text = imageErrorText(error);
+        errors.push(`p${promptIndex + 1}/s${seedTry + 1}: ${text}`);
+        if (isImageHardStop(error)) throw error;
+        // 3030 / output flagged: zmieniamy seed, a następnie przechodzimy na prostszy prompt.
+        // Dla innych pojedynczych błędów również dajemy tylko ograniczoną liczbę prób.
+      }
+      attempt++;
+    }
+  }
+  throw new Error(`Generowanie zdjęcia AI nie przeszło walidacji po ${attempt} próbach. ${errors.join(" | ").slice(0, 1400)}`);
+}
+
+function imageResponse(bytes: Uint8Array, extra: Record<string, string> = {}): Response {
+  return new Response(bytes, {
+    status: 200,
+    headers: {
+      "content-type": imageMimeType(bytes),
+      "cache-control": "public, max-age=31536000, immutable",
+      "Access-Control-Allow-Origin": "*",
+      "X-F1-AI-Image-Model": MEDIA_MODEL,
+      "X-F1-AI-Generated": "1",
+      ...extra,
+    },
+  });
+}
+
+async function generateAndCacheImage(cacheKey: Request, cache: Cache, env: Env, prompts: string[], seedHash: string): Promise<{ bytes: Uint8Array; promptIndex: number; attempt: number }> {
+  const generated = await generateValidatedImage(env, prompts, seedHash);
+  const response = imageResponse(generated.bytes, {
+    "X-F1-AI-Prompt-Variant": String(generated.promptIndex + 1),
+    "X-F1-AI-Attempt": String(generated.attempt + 1),
+  });
+  try { await cache.put(cacheKey, response.clone()); } catch (_) {}
+  return generated;
 }
 
 async function serveGeneratedImage(request: Request, env: Env): Promise<Response> {
@@ -505,38 +682,47 @@ async function serveGeneratedImage(request: Request, env: Env): Promise<Response
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
 
-  let prompt = "";
+  let prompts: string[] = [];
   let seedHash = "";
-  if (url.pathname.startsWith("/media/news/")) {
+
+  if (url.pathname.startsWith("/media/news-v35/")) {
+    const match = url.pathname.match(/^\/media\/news-v35\/([a-f0-9]{64})\.jpg$/);
+    if (!match) return new Response("Not found", { status: 404 });
+    const encoded = url.searchParams.get("s") || "";
+    if (!encoded || encoded.length > 5000) return new Response("Invalid image specification", { status: 400 });
+    let spec: NewsPhotoSpec;
+    try { spec = JSON.parse(base64UrlDecodeUtf8(encoded)); } catch { return new Response("Invalid image specification", { status: 400 }); }
+    const specJson = JSON.stringify(spec);
+    const actualHash = await sha256Hex(`${MEDIA_PROMPT_REVISION}:${specJson}`);
+    if (actualHash !== match[1] || spec.revision !== MEDIA_PROMPT_REVISION) return new Response("Invalid image signature", { status: 400 });
+    prompts = [buildPhotoPromptFromSpec(spec, false), buildPhotoPromptFromSpec(spec, true)];
+    seedHash = actualHash;
+  } else if (url.pathname.startsWith("/media/news/")) {
+    // Backward compatibility dla wcześniej zapisanych linków v34.
     const match = url.pathname.match(/^\/media\/news\/([a-f0-9]{64})\.jpg$/);
     if (!match) return new Response("Not found", { status: 404 });
     const encoded = url.searchParams.get("p") || "";
     if (!encoded || encoded.length > 6000) return new Response("Invalid image prompt", { status: 400 });
+    let prompt = "";
     try { prompt = base64UrlDecodeUtf8(encoded); } catch { return new Response("Invalid image prompt", { status: 400 }); }
     const actualHash = await sha256Hex(prompt);
     if (actualHash !== match[1]) return new Response("Invalid image signature", { status: 400 });
+    prompts = [prompt];
     seedHash = actualHash;
   } else {
     const match = url.pathname.match(/^\/media\/track-v1\/([a-z0-9-]{2,40})\.jpg$/);
     if (!match) return new Response("Not found", { status: 404 });
-    prompt = buildTrackPhotoPrompt(match[1]) || "";
+    const prompt = buildTrackPhotoPrompt(match[1]) || "";
     if (!prompt) return new Response("Unknown track", { status: 404 });
+    prompts = [prompt, clean(`Photorealistic wide aerial motorsport photograph of a modern racing circuit at ${match[1].replace(/-/g, " ")}. The asphalt circuit is the clear main subject with realistic kerbs, barriers, pit buildings and grandstands. Clean believable professional drone photography. No text, logos or labels.`, 900)];
     seedHash = await sha256Hex(`track-v1:${match[1]}:${prompt}`);
   }
 
-  const bytes = await fluxImageBytes(env, prompt, seedHash);
-  const response = new Response(bytes, {
-    status: 200,
-    headers: {
-      "content-type": imageMimeType(bytes),
-      "cache-control": "public, max-age=31536000, immutable",
-      "Access-Control-Allow-Origin": "*",
-      "X-F1-AI-Image-Model": MEDIA_MODEL,
-      "X-F1-AI-Generated": "1",
-    },
+  const generated = await generateAndCacheImage(cacheKey, cache, env, prompts, seedHash);
+  return imageResponse(generated.bytes, {
+    "X-F1-AI-Prompt-Variant": String(generated.promptIndex + 1),
+    "X-F1-AI-Attempt": String(generated.attempt + 1),
   });
-  try { await cache.put(cacheKey, response.clone()); } catch (_) {}
-  return response;
 }
 
 async function withCache(request: Request, keySuffix: string, producer: () => Promise<any>) {
@@ -696,7 +882,7 @@ async function media(request: Request, env: Env): Promise<Response> {
 
   const canonical = JSON.stringify({ id, season, title, text, round, category, family, truthEvidence, people, teams, driverTeams, tags, mediaPromptRevision: MEDIA_PROMPT_REVISION });
   const sourceHash = await sha256Hex(canonical);
-  const cached = await withCache(request, `media-v34/${sourceHash}`, async () => {
+  const cached = await withCache(request, `media-v35/${sourceHash}`, async () => {
     const system = [
       "Jesteś dyrektorem wizualnym profesjonalnego newsroomu ligi Turniej F1 2026.",
       "Nie ustalasz faktów. Nie dodawaj żadnych nowych nazw, zespołów, torów, wyników ani liczb.",
@@ -753,10 +939,26 @@ async function media(request: Request, env: Env): Promise<Response> {
     const sourceForNumbers = [season, title, text, round, category, truthEvidence, people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
     const outputForNumbers = [strapline, focusTitle, ...focus].join(" ");
     if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error("AI visual próbowało dodać nową liczbę.");
-    const imagePrompt = buildNewsPhotoPrompt({ title, text, round, category, family, people, teams, driverTeams, tone, requestedSceneType: sceneType });
-    const imageHash = await sha256Hex(imagePrompt);
+    const photoSpec = buildNewsPhotoSpec({ sceneType, teams, people, driverTeams, tone });
+    const specJson = JSON.stringify(photoSpec);
+    const imageHash = await sha256Hex(`${MEDIA_PROMPT_REVISION}:${specJson}`);
     const origin = new URL(request.url).origin;
-    const imageDataUri = `${origin}/media/news/${imageHash}.jpg?p=${encodeURIComponent(base64UrlEncodeUtf8(imagePrompt))}`;
+    const imageDataUri = `${origin}/media/news-v35/${imageHash}.jpg?s=${encodeURIComponent(base64UrlEncodeUtf8(specJson))}`;
+
+    // V3.5: READY dopiero po faktycznym wygenerowaniu i zapisaniu poprawnego obrazu do cache.
+    // To naprawia sytuację, w której arkusz pokazywał READY, a dopiero przeglądarka trafiała na 3030/flagged.
+    const imageCache = (caches as any).default as Cache;
+    const imageCacheKey = new Request(imageDataUri, { method: "GET" });
+    let prewarmed = await imageCache.match(imageCacheKey);
+    let imageValidation = { promptIndex: 0, attempt: 0 };
+    if (!prewarmed) {
+      const prompts = [buildPhotoPromptFromSpec(photoSpec, false), buildPhotoPromptFromSpec(photoSpec, true)];
+      const generated = await generateAndCacheImage(imageCacheKey, imageCache, env, prompts, imageHash);
+      imageValidation = { promptIndex: generated.promptIndex, attempt: generated.attempt };
+      prewarmed = await imageCache.match(imageCacheKey);
+    }
+    if (!prewarmed) throw new Error("Zdjęcie AI wygenerowało się, ale nie udało się zapisać go w cache Workera.");
+
     return {
       ok: true,
       service: SERVICE,
@@ -778,6 +980,9 @@ async function media(request: Request, env: Env): Promise<Response> {
         source: 'News Engine',
         directionModel: MEDIA_DIRECTION_MODEL,
         imageModel: MEDIA_MODEL,
+        imageValidated: true,
+        imagePromptVariant: imageValidation.promptIndex + 1,
+        imageAttempt: imageValidation.attempt + 1,
       },
     };
   });
@@ -933,7 +1138,7 @@ export default {
         mediaGuidance: MEDIA_GUIDANCE,
         analysisModel: ANALYSIS_MODEL,
         aiBinding: Boolean(env.AI),
-        endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis','/media/news/:hash.jpg','/media/track-v1/:key.jpg'],
+        endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis','/media/news-v35/:hash.jpg','/media/news/:hash.jpg','/media/track-v1/:key.jpg'],
       });
     }
     if (request.method === 'POST' && url.pathname === '/api/test') {
@@ -951,7 +1156,7 @@ export default {
         return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
       }
     }
-    if (request.method === 'GET' && (url.pathname.startsWith('/media/news/') || url.pathname.startsWith('/media/track-v1/'))) {
+    if (request.method === 'GET' && (url.pathname.startsWith('/media/news-v35/') || url.pathname.startsWith('/media/news/') || url.pathname.startsWith('/media/track-v1/'))) {
       try {
         return await serveGeneratedImage(request, env);
       } catch (error) {
