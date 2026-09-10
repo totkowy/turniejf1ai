@@ -7,7 +7,7 @@ const EDITORIAL_MODEL = "@cf/zai-org/glm-4.7-flash";
 const MEDIA_MODEL = "@cf/zai-org/glm-4.7-flash";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "3.0-media-analysis";
+const VERSION = "3.1-structured-tools";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -88,6 +88,68 @@ function extractModelText(result: any): string {
   }
   if (typeof result?.result?.response === "string") return result.result.response;
   return "";
+}
+
+
+function parseToolArguments(value: unknown): any | null {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return null;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+function extractStructuredToolArgs(result: any, toolName: string): any | null {
+  const directCalls = Array.isArray(result?.tool_calls) ? result.tool_calls : [];
+  const messageCalls = Array.isArray(result?.choices?.[0]?.message?.tool_calls)
+    ? result.choices[0].message.tool_calls
+    : [];
+  const nestedCalls = Array.isArray(result?.result?.tool_calls) ? result.result.tool_calls : [];
+  const calls = [...directCalls, ...messageCalls, ...nestedCalls];
+  for (const call of calls) {
+    const name = clean(call?.name || call?.function?.name, 120);
+    if (toolName && name && name !== toolName) continue;
+    const args = parseToolArguments(call?.arguments ?? call?.function?.arguments);
+    if (args) return args;
+  }
+  return null;
+}
+
+async function runStructured(
+  env: Env,
+  model: string,
+  messages: Array<{ role: string; content: string }>,
+  toolName: string,
+  description: string,
+  parameters: any,
+  maxCompletionTokens: number,
+): Promise<any> {
+  const result: any = await env.AI.run(model as any, {
+    messages,
+    tools: [
+      {
+        name: toolName,
+        description,
+        parameters,
+      },
+    ],
+    tool_choice: "required",
+    reasoning_effort: "low",
+    temperature: 0.15,
+    max_completion_tokens: maxCompletionTokens,
+  } as any);
+
+  const toolArgs = extractStructuredToolArgs(result, toolName);
+  if (toolArgs) return toolArgs;
+
+  // Fallback: jeśli provider zwróci zwykły tekst zamiast tool calla,
+  // próbujemy jeszcze odczytać JSON z content/response.
+  const text = extractModelText(result);
+  if (text) {
+    try { return parseJsonObject(text); } catch {}
+  }
+
+  const finishReason = clean(result?.choices?.[0]?.finish_reason || result?.finish_reason || "brak", 80);
+  const responseType = clean(result?.object || result?.type || typeof result, 80);
+  throw new Error(`AI nie zwróciło danych strukturalnych. finish_reason=${finishReason}, response=${responseType}`);
 }
 
 async function sha256Hex(text: string): Promise<string> {
@@ -293,17 +355,26 @@ async function editorial(request: Request, env: Env): Promise<Response> {
       "Przeredaguj ten materiał. Nie dopisuj niczego spoza powyższych danych.",
     ].join("\n");
 
-    const result: any = await env.AI.run(EDITORIAL_MODEL, {
-      messages: [
+    const parsed = await runStructured(
+      env,
+      EDITORIAL_MODEL,
+      [
         { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "user", content: user + "\nZakończ odpowiedź wywołaniem narzędzia submitEditorial." },
       ],
-      temperature: 0.25,
-      max_completion_tokens: 650,
-    } as any);
-
-    const modelText = extractModelText(result);
-    const parsed = parseJsonObject(modelText);
+      "submitEditorial",
+      "Zwróć gotową, bezpieczną redakcję newsa opartą wyłącznie na dostarczonych faktach.",
+      {
+        type: "object",
+        properties: {
+          headline: { type: "string" },
+          lead: { type: "string" },
+          paragraphs: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2 },
+        },
+        required: ["headline", "lead", "paragraphs"],
+      },
+      900,
+    );
     const headline = clean(parsed?.headline, 95);
     const lead = clean(parsed?.lead, 280);
     const paragraphs = stringArray(parsed?.paragraphs, 2, 520);
@@ -385,15 +456,27 @@ async function media(request: Request, env: Env): Promise<Response> {
       'Zaproponuj wyłącznie krótki art direction do wizualu newsowego bez dopisywania faktów.',
     ].join("\n");
 
-    const result: any = await env.AI.run(MEDIA_MODEL, {
-      messages: [
+    const parsed = await runStructured(
+      env,
+      MEDIA_MODEL,
+      [
         { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "user", content: user + "\nZakończ odpowiedź wywołaniem narzędzia submitMediaDirection." },
       ],
-      temperature: 0.35,
-      max_completion_tokens: 280,
-    } as any);
-    const parsed = parseJsonObject(extractModelText(result));
+      "submitMediaDirection",
+      "Zwróć krótki art direction do wizualu newsowego bez dodawania nowych faktów.",
+      {
+        type: "object",
+        properties: {
+          strapline: { type: "string" },
+          focusTitle: { type: "string" },
+          focus: { type: "array", items: { type: "string" }, maxItems: 2 },
+          tone: { type: "string", enum: ["duel", "alarm", "success", "neutral"] },
+        },
+        required: ["strapline", "focusTitle", "focus", "tone"],
+      },
+      650,
+    );
     const strapline = clean(parsed?.strapline || text, 160) || title;
     const focusTitle = clean(parsed?.focusTitle || category || 'Turniej F1', 40);
     const focus = stringArray(parsed?.focus, 2, 34);
@@ -502,15 +585,29 @@ async function analysis(request: Request, env: Env): Promise<Response> {
       'Napisz zwięzły komentarz analityczny oparty tylko na tych danych.',
     ].join('\n');
 
-    const result: any = await env.AI.run(ANALYSIS_MODEL, {
-      messages: [
+    const parsed = await runStructured(
+      env,
+      ANALYSIS_MODEL,
+      [
         { role: 'system', content: system },
-        { role: 'user', content: user },
+        { role: 'user', content: user + '\nZakończ odpowiedź wywołaniem narzędzia submitAnalysis.' },
       ],
-      temperature: 0.25,
-      max_completion_tokens: 420,
-    } as any);
-    const parsed = parseJsonObject(extractModelText(result));
+      'submitAnalysis',
+      'Zwróć komentarz analityczny oparty wyłącznie na dostarczonych danych sezonu.',
+      {
+        type: 'object',
+        properties: {
+          headline: { type: 'string' },
+          summary: { type: 'string' },
+          bullets: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 3 },
+          titleFight: { type: 'string' },
+          momentum: { type: 'string' },
+          constructors: { type: 'string' },
+        },
+        required: ['headline', 'summary', 'bullets', 'titleFight', 'momentum', 'constructors'],
+      },
+      850,
+    );
     const headline = clean(parsed?.headline, 90);
     const summary = clean(parsed?.summary, 260);
     const bullets = stringArray(parsed?.bullets, 3, 180);
@@ -590,8 +687,8 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/media') return await media(request, env);
       if (request.method === 'POST' && url.pathname === '/api/analysis') return await analysis(request, env);
       return json({ ok: false, error: 'Nieznany endpoint.' }, 404);
-} catch (error) {
-  return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
-}
+    } catch (error) {
+      return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
+    }
   },
 } satisfies ExportedHandler<Env>;
