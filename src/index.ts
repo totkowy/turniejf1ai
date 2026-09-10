@@ -4,10 +4,11 @@ interface Env {
 }
 
 const EDITORIAL_MODEL = "@cf/zai-org/glm-4.7-flash";
-const MEDIA_MODEL = "@cf/zai-org/glm-4.7-flash";
+const MEDIA_DIRECTION_MODEL = "@cf/zai-org/glm-4.7-flash";
+const MEDIA_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "3.2-tool-schema-fix";
+const VERSION = "3.3-real-ai-images";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -174,30 +175,6 @@ function authorized(request: Request, env: Env): boolean {
   return request.headers.get("X-F1-AI-Key") === required;
 }
 
-function xml(value: unknown): string {
-  return clean(value, 1000)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function initials(value: string): string {
-  const parts = clean(value, 80).split(/\s+/).filter(Boolean).slice(0, 2);
-  const out = parts.map((p) => p.charAt(0).toUpperCase()).join("");
-  return out || "F1";
-}
-
-function colorFromSeed(seed: string, offset = 0): string {
-  let acc = offset;
-  for (const ch of seed) acc = (acc * 33 + ch.charCodeAt(0)) >>> 0;
-  const hue = acc % 360;
-  const sat = 72 - (acc % 11);
-  const light = 48 + (acc % 8);
-  return `hsl(${hue} ${sat}% ${light}%)`;
-}
-
 function slugTone(value: string): string {
   const v = clean(value, 30).toLowerCase();
   if (["alarm", "pressure", "tension"].includes(v)) return "alarm";
@@ -206,89 +183,204 @@ function slugTone(value: string): string {
   return "neutral";
 }
 
-function mediaAccent(seed: string, tone: string): {accent:string; secondary:string; bg1:string; bg2:string;} {
-  if (tone === "alarm") {
-    return {accent:"#ff3b30",secondary:"#ff9f0a",bg1:"#10070a",bg2:"#2d0b10"};
+
+function base64UrlEncodeUtf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
-  if (tone === "success") {
-    return {accent:"#00c853",secondary:"#00b0ff",bg1:"#07100c",bg2:"#08222b"};
-  }
-  if (tone === "duel") {
-    return {accent:"#ff2d55",secondary:"#4da3ff",bg1:"#090c14",bg2:"#151d2f"};
-  }
-  return {accent:colorFromSeed(seed, 17),secondary:colorFromSeed(seed, 99),bg1:"#080a11",bg2:"#1a1f2d"};
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
-function svgDataUri(svg: string): string {
-  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+function base64UrlDecodeUtf8(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4 || 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
 }
 
-function buildMediaSvg(input: {
+function base64ToBytes(value: string): Uint8Array {
+  const cleanBase64 = value.replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, "");
+  const binary = atob(cleanBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+function imageMimeType(bytes: Uint8Array): string {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(8,12)) === "WEBP") return "image/webp";
+  return "image/jpeg";
+}
+
+function deterministicSeed(hash: string): number {
+  const parsed = Number.parseInt(hash.slice(0, 8), 16);
+  return Number.isFinite(parsed) ? (parsed & 0x7fffffff) : 2026;
+}
+
+function teamLiveryDescription(team: string): string {
+  const key = clean(team, 80).toUpperCase().replace(/\s+/g, " ");
+  if (!key) return "neutral dark graphite with subtle red accents";
+  if (key.includes("MCLAREN")) return "papaya orange and black";
+  if (key.includes("FERRARI")) return "scarlet racing red with restrained black accents";
+  if (key.includes("RED BULL") || key.includes("REDBULL")) return "deep navy blue with vivid red and yellow accents";
+  if (key.includes("MERCEDES")) return "metallic silver and black with turquoise accents";
+  if (key.includes("ASTON")) return "British racing green with lime accents";
+  if (key.includes("ALPINE")) return "deep blue with pink accents";
+  if (key.includes("WILLIAMS")) return "bright royal blue with white accents";
+  if (key.includes("HAAS")) return "white, black and red";
+  if (key.includes("RACING BULL") || key === "RB") return "white and dark navy with blue accents";
+  if (key.includes("SAUBER")) return "black with vivid electric green accents";
+  if (key.includes("AUDI")) return "black, graphite and deep red";
+  if (key.includes("CADILLAC")) return "black, white and metallic silver";
+  return "distinctive professional racing colors matching the supplied team identity";
+}
+
+function buildNewsPhotoPrompt(input: {
   title: string;
-  strapline: string;
-  category: string;
+  text: string;
   round: string;
-  badge: string;
-  focus: string[];
-  focusTitle: string;
+  category: string;
+  people: string[];
+  teams: string[];
   tone: string;
-  seed: string;
 }) {
-  const palette = mediaAccent(input.seed, slugTone(input.tone));
-  const focus = input.focus.slice(0, 2);
-  const left = focus[0] || input.focusTitle || input.category || "Turniej F1";
-  const right = focus[1] || input.round || "Sezon 2026";
-  const leftInit = initials(left);
-  const rightInit = initials(right);
-  const svg = `
-  <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="${xml(input.title)}">
-    <defs>
-      <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="${palette.bg1}"/>
-        <stop offset="100%" stop-color="${palette.bg2}"/>
-      </linearGradient>
-      <linearGradient id="accentA" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="${palette.accent}" stop-opacity="0.96"/>
-        <stop offset="100%" stop-color="${palette.secondary}" stop-opacity="0.92"/>
-      </linearGradient>
-      <linearGradient id="glass" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0%" stop-color="#ffffff" stop-opacity="0.12"/>
-        <stop offset="100%" stop-color="#ffffff" stop-opacity="0.02"/>
-      </linearGradient>
-      <filter id="blur" x="-20%" y="-20%" width="140%" height="140%">
-        <feGaussianBlur stdDeviation="40"/>
-      </filter>
-    </defs>
-    <rect width="1600" height="900" fill="url(#bg)"/>
-    <circle cx="1160" cy="240" r="220" fill="${palette.accent}" opacity="0.24" filter="url(#blur)"/>
-    <circle cx="1320" cy="640" r="180" fill="${palette.secondary}" opacity="0.16" filter="url(#blur)"/>
-    <path d="M0 760 C260 660, 380 640, 640 690 S1100 780,1600 640 L1600 900 L0 900 Z" fill="#ffffff" opacity="0.04"/>
-    <rect x="56" y="52" rx="18" ry="18" width="226" height="56" fill="#ef233c"/>
-    <text x="78" y="88" font-size="28" font-family="Arial, Helvetica, sans-serif" font-weight="800" fill="#ffffff">${xml(input.badge)}</text>
-    <rect x="56" y="128" rx="28" ry="28" width="250" height="44" fill="#ffffff" fill-opacity="0.08" stroke="#ffffff" stroke-opacity="0.16"/>
-    <text x="82" y="158" font-size="24" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#ffffff">${xml(input.category.toUpperCase())}</text>
-    <text x="56" y="248" font-size="86" font-family="Arial, Helvetica, sans-serif" font-weight="900" fill="#ffffff">${xml(input.title).slice(0, 90)}</text>
-    <foreignObject x="58" y="282" width="780" height="190"><div xmlns="http://www.w3.org/1999/xhtml" style="font-family:Arial,Helvetica,sans-serif;font-size:31px;line-height:1.28;color:#dfe6ef;font-weight:600;">${xml(input.strapline).slice(0, 240)}</div></foreignObject>
-    <rect x="58" y="760" rx="22" ry="22" width="530" height="88" fill="#0e121a" fill-opacity="0.78" stroke="#ffffff" stroke-opacity="0.12"/>
-    <text x="88" y="796" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#c9d1db">Runda</text>
-    <text x="88" y="828" font-size="34" font-family="Arial, Helvetica, sans-serif" font-weight="900" fill="#ffffff">${xml(input.round || 'Aktualny etap sezonu')}</text>
-    <rect x="650" y="116" rx="34" ry="34" width="422" height="680" fill="url(#glass)" stroke="#ffffff" stroke-opacity="0.11"/>
-    <rect x="710" y="194" rx="34" ry="34" width="250" height="470" fill="url(#accentA)" opacity="0.95"/>
-    <circle cx="835" cy="255" r="94" fill="#ffffff" fill-opacity="0.1"/>
-    <text x="835" y="284" text-anchor="middle" font-size="108" font-family="Arial, Helvetica, sans-serif" font-weight="900" fill="#ffffff">${xml(leftInit)}</text>
-    <text x="835" y="555" text-anchor="middle" font-size="56" font-family="Arial, Helvetica, sans-serif" font-weight="900" fill="#ffffff">1</text>
-    <text x="835" y="612" text-anchor="middle" font-size="36" font-family="Arial, Helvetica, sans-serif" font-weight="800" fill="#ffffff">${xml(left.toUpperCase()).slice(0, 26)}</text>
-    <rect x="1010" y="230" rx="34" ry="34" width="250" height="434" fill="#0f68c2" opacity="0.9"/>
-    <circle cx="1135" cy="285" r="92" fill="#ffffff" fill-opacity="0.1"/>
-    <text x="1135" y="314" text-anchor="middle" font-size="100" font-family="Arial, Helvetica, sans-serif" font-weight="900" fill="#ffffff">${xml(rightInit)}</text>
-    <text x="1135" y="560" text-anchor="middle" font-size="52" font-family="Arial, Helvetica, sans-serif" font-weight="900" fill="#ffffff">2</text>
-    <text x="1135" y="612" text-anchor="middle" font-size="34" font-family="Arial, Helvetica, sans-serif" font-weight="800" fill="#ffffff">${xml(right.toUpperCase()).slice(0, 26)}</text>
-    <rect x="1100" y="86" rx="18" ry="18" width="366" height="76" fill="#0d1117" fill-opacity="0.78" stroke="#ffffff" stroke-opacity="0.14"/>
-    <text x="1128" y="118" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="800" fill="#c7ced7">AI VISUAL</text>
-    <text x="1128" y="146" font-size="22" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#ffffff">Wygenerowane przez AI • ${xml(SERVICE)}</text>
-    <text x="1110" y="840" font-size="20" font-family="Arial, Helvetica, sans-serif" font-weight="700" fill="#b4bdc7">Model: ${xml(MEDIA_MODEL)} • Fakty: News Engine + Truth Guard</text>
-  </svg>`;
-  return svgDataUri(svg);
+  const teamA = input.teams[0] ? teamLiveryDescription(input.teams[0]) : "";
+  const teamB = input.teams[1] ? teamLiveryDescription(input.teams[1]) : "";
+  const teamLine = teamA && teamB
+    ? `Show two rival fictional single-seat race cars: the first in ${teamA}, the second in ${teamB}.`
+    : teamA
+      ? `Show one leading fictional single-seat race car in ${teamA}.`
+      : "Use believable modern motorsport liveries in dark graphite, red and metallic tones.";
+  const mood = slugTone(input.tone);
+  const sceneHint = mood === "duel"
+    ? "Capture a close wheel-to-wheel battle or overtaking moment."
+    : mood === "alarm"
+      ? "Capture a tense high-pressure racing moment with dramatic braking or a close chase."
+      : mood === "success"
+        ? "Capture a triumphant but realistic racing moment, such as crossing the line or exiting a corner strongly."
+        : "Capture a realistic dynamic race-weekend moment on circuit.";
+  const narrative = clean(`${input.title}. ${input.text}`, 420);
+  return clean([
+    "Photorealistic editorial motorsport photograph for a fictional amateur open-wheel championship in 2026.",
+    "Modern single-seat race cars, realistic carbon fibre, tyres, track surface, safety barriers and grandstands.",
+    teamLine,
+    sceneHint,
+    narrative ? `Story context: ${narrative}` : "",
+    input.round ? `Race-weekend context: ${clean(input.round, 100)}.` : "",
+    "Use a cinematic sports-photography camera angle, realistic motion blur, natural lighting and believable proportions.",
+    "Drivers must remain helmeted and non-identifiable; do not invent recognizable faces.",
+    "ABSOLUTELY NO readable text, letters, numbers, logos, sponsor marks, flags with words, captions, UI, badges or watermarks inside the image.",
+    "The image itself must contain only the scene; website text will be rendered separately."
+  ].filter(Boolean).join(" "), 1500);
+}
+
+const TRACK_SCENES: Record<string, string> = {
+  "melbourne": "Albert Park style temporary parkland street circuit in Melbourne, green park, lake and city skyline",
+  "shanghai": "Shanghai International Circuit style modern permanent racing circuit with sweeping grandstands and futuristic architecture",
+  "suzuka": "Suzuka style Japanese figure-eight racing circuit surrounded by green landscape and packed grandstands",
+  "sakhir": "Bahrain International Circuit style desert racing venue at Sakhir with floodlights and sandy surroundings",
+  "jeddah": "Jeddah Corniche style ultra-fast night street circuit beside the Red Sea with city lights",
+  "miami": "Miami Gardens style modern temporary circuit around a stadium with palm trees and bright Florida atmosphere",
+  "montreal": "Circuit Gilles Villeneuve style island racing circuit in Montreal surrounded by trees and water",
+  "monaco": "Monaco street circuit style racing through Monte Carlo harbour, yachts, dense city buildings and barriers",
+  "barcelona": "Barcelona-Catalunya style permanent circuit on rolling dry terrain outside Barcelona",
+  "spielberg": "Red Bull Ring style compact Austrian circuit in green Styrian hills and mountains",
+  "silverstone": "Silverstone style fast British permanent circuit with broad run-off areas, large grandstands and overcast dramatic sky",
+  "spa": "Spa-Francorchamps style long Belgian circuit through forested Ardennes hills with dramatic elevation changes",
+  "hungaroring": "Hungaroring style compact technical circuit in rolling Hungarian countryside near Budapest",
+  "zandvoort": "Zandvoort style Dutch coastal circuit among sand dunes near the North Sea",
+  "monza": "Monza style historic ultra-fast Italian circuit running through dense parkland and old trees",
+  "madrid": "Madring style modern Spanish semi-urban circuit in Madrid with contemporary city infrastructure",
+  "baku": "Baku street circuit style racing through historic stone city walls and modern skyline on the Caspian coast",
+  "singapore": "Marina Bay style night street circuit in Singapore with skyscrapers, floodlights and illuminated waterfront",
+  "austin": "Circuit of the Americas style Texas racing circuit with dramatic elevation and a tall observation tower",
+  "mexico-city": "Autodromo Hermanos Rodriguez style high-altitude circuit in Mexico City with stadium section and packed grandstands",
+  "interlagos": "Interlagos style compact Brazilian circuit on rolling terrain in Sao Paulo with dense urban skyline",
+  "las-vegas": "Las Vegas Strip style night street circuit with neon-lit resort skyline and bright city reflections",
+  "lusail": "Lusail style floodlit desert racing circuit in Qatar at night with modern grandstands",
+  "yas-marina": "Yas Marina style Abu Dhabi circuit at dusk with marina, modern architecture and illuminated hotel",
+  "imola": "Imola style classic Italian racing circuit through green parkland with old-school kerbs and elevation"
+};
+
+function buildTrackPhotoPrompt(key: string): string | null {
+  const scene = TRACK_SCENES[key];
+  if (!scene) return null;
+  return clean([
+    `Photorealistic high aerial drone-style motorsport photograph of a ${scene}.`,
+    "The racing circuit itself must be clearly visible and be the main subject of the frame.",
+    "Show realistic asphalt, kerbs, barriers, run-off, pit buildings and grandstands appropriate to the location.",
+    "Wide cinematic composition, realistic daylight or night lighting appropriate to the venue, highly detailed but believable.",
+    "No close-up drivers. No readable text, labels, numbers, logos, sponsor marks, UI or watermarks.",
+    "This is an AI visualization for a race calendar, not a technical or official circuit map."
+  ].join(" "), 1200);
+}
+
+async function fluxImageBytes(env: Env, prompt: string, seedHash: string): Promise<Uint8Array> {
+  const form = new FormData();
+  form.append("prompt", prompt);
+  form.append("width", "1024");
+  form.append("height", "512");
+  form.append("seed", String(deterministicSeed(seedHash)));
+  const formResponse = new Response(form);
+  const formStream = formResponse.body;
+  const formContentType = formResponse.headers.get("content-type");
+  if (!formStream || !formContentType) throw new Error("Nie udało się przygotować danych obrazu dla Workers AI.");
+  const result: any = await env.AI.run(MEDIA_MODEL as any, {
+    multipart: {
+      body: formStream,
+      contentType: formContentType,
+    },
+  } as any);
+  const image = typeof result?.image === "string" ? result.image : "";
+  if (!image) throw new Error("Model obrazu nie zwrócił danych JPEG.");
+  return base64ToBytes(image);
+}
+
+async function serveGeneratedImage(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const cache = (caches as any).default as Cache;
+  const cacheKey = new Request(url.toString(), { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+
+  let prompt = "";
+  let seedHash = "";
+  if (url.pathname.startsWith("/media/news/")) {
+    const match = url.pathname.match(/^\/media\/news\/([a-f0-9]{64})\.jpg$/);
+    if (!match) return new Response("Not found", { status: 404 });
+    const encoded = url.searchParams.get("p") || "";
+    if (!encoded || encoded.length > 6000) return new Response("Invalid image prompt", { status: 400 });
+    try { prompt = base64UrlDecodeUtf8(encoded); } catch { return new Response("Invalid image prompt", { status: 400 }); }
+    const actualHash = await sha256Hex(prompt);
+    if (actualHash !== match[1]) return new Response("Invalid image signature", { status: 400 });
+    seedHash = actualHash;
+  } else {
+    const match = url.pathname.match(/^\/media\/track-v1\/([a-z0-9-]{2,40})\.jpg$/);
+    if (!match) return new Response("Not found", { status: 404 });
+    prompt = buildTrackPhotoPrompt(match[1]) || "";
+    if (!prompt) return new Response("Unknown track", { status: 404 });
+    seedHash = await sha256Hex(`track-v1:${match[1]}:${prompt}`);
+  }
+
+  const bytes = await fluxImageBytes(env, prompt, seedHash);
+  const response = new Response(bytes, {
+    status: 200,
+    headers: {
+      "content-type": imageMimeType(bytes),
+      "cache-control": "public, max-age=31536000, immutable",
+      "Access-Control-Allow-Origin": "*",
+      "X-F1-AI-Image-Model": MEDIA_MODEL,
+      "X-F1-AI-Generated": "1",
+    },
+  });
+  try { await cache.put(cacheKey, response.clone()); } catch (_) {}
+  return response;
 }
 
 async function withCache(request: Request, keySuffix: string, producer: () => Promise<any>) {
@@ -444,12 +536,12 @@ async function media(request: Request, env: Env): Promise<Response> {
 
   const canonical = JSON.stringify({ id, season, title, text, round, category, truthEvidence, people, teams, tags });
   const sourceHash = await sha256Hex(canonical);
-  const cached = await withCache(request, `media/${sourceHash}`, async () => {
+  const cached = await withCache(request, `media-v33/${sourceHash}`, async () => {
     const system = [
       "Tworzysz krótką koncepcję grafiki newsowej dla ligi Turniej F1 2026.",
       "Nie dodawaj żadnych nowych faktów ani liczb.",
-      "Masz przygotować WYŁĄCZNIE zwięzły JSON sterujący abstrakcyjnym key visualem.",
-      "Grafika będzie finalnie złożona jako SVG z oznaczeniem AI VISUAL.",
+      "Masz przygotować WYŁĄCZNIE zwięzły JSON opisujący kierunek realistycznej fotografii motorsportowej.",
+      "Finalny obraz zostanie wygenerowany osobnym modelem text-to-image i nie może zawierać tekstu.",
       "Zwróć JSON: {\"strapline\":\"...\",\"focusTitle\":\"...\",\"focus\":[\"...\",\"...\"],\"tone\":\"duel|alarm|success|neutral\"}.",
       "strapline max 160 znaków, focusTitle max 40 znaków, focus do 2 krótkich haseł.",
     ].join("\n");
@@ -468,7 +560,7 @@ async function media(request: Request, env: Env): Promise<Response> {
 
     const parsed = await runStructured(
       env,
-      MEDIA_MODEL,
+      MEDIA_DIRECTION_MODEL,
       [
         { role: "system", content: system },
         { role: "user", content: user + "\nZakończ odpowiedź wywołaniem narzędzia submitMediaDirection." },
@@ -494,17 +586,10 @@ async function media(request: Request, env: Env): Promise<Response> {
     const sourceForNumbers = [season, title, text, round, category, truthEvidence, people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
     const outputForNumbers = [strapline, focusTitle, ...focus].join(" ");
     if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error("AI visual próbowało dodać nową liczbę.");
-    const imageDataUri = buildMediaSvg({
-      title,
-      strapline,
-      category,
-      round,
-      badge: 'AI VISUAL',
-      focus: focus.length ? focus : [...people.slice(0,2), ...teams.slice(0,2)].slice(0,2),
-      focusTitle,
-      tone,
-      seed: sourceHash,
-    });
+    const imagePrompt = buildNewsPhotoPrompt({ title, text, round, category, people, teams, tone });
+    const imageHash = await sha256Hex(imagePrompt);
+    const origin = new URL(request.url).origin;
+    const imageDataUri = `${origin}/media/news/${imageHash}.jpg?p=${encodeURIComponent(base64UrlEncodeUtf8(imagePrompt))}`;
     return {
       ok: true,
       service: SERVICE,
@@ -512,16 +597,18 @@ async function media(request: Request, env: Env): Promise<Response> {
       model: MEDIA_MODEL,
       sourceHash,
       media: {
-        kind: 'svg',
+        kind: 'photo',
         imageDataUri,
-        alt: `AI wygenerowany wizual do newsa: ${title}`,
+        alt: `Fotorealistyczny wizual AI do newsa: ${title}`,
         strapline,
         focusTitle,
         focus,
         tone,
-        label: 'AI VISUAL • wygenerowane przez AI',
+        label: 'AI FOTO • wygenerowane przez AI',
         factsVerifiedBy: 'Truth Guard 2.1',
         source: 'News Engine',
+        directionModel: MEDIA_DIRECTION_MODEL,
+        imageModel: MEDIA_MODEL,
       },
     };
   });
@@ -671,10 +758,11 @@ export default {
         service: SERVICE,
         version: VERSION,
         editorialModel: EDITORIAL_MODEL,
+        mediaDirectionModel: MEDIA_DIRECTION_MODEL,
         mediaModel: MEDIA_MODEL,
         analysisModel: ANALYSIS_MODEL,
         aiBinding: Boolean(env.AI),
-        endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis'],
+        endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis','/media/news/:hash.jpg','/media/track-v1/:key.jpg'],
       });
     }
     if (request.method === 'POST' && url.pathname === '/api/test') {
@@ -690,6 +778,16 @@ export default {
         return json({ ok: true, model: EDITORIAL_MODEL, result });
       } catch (error) {
         return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
+      }
+    }
+    if (request.method === 'GET' && (url.pathname.startsWith('/media/news/') || url.pathname.startsWith('/media/track-v1/'))) {
+      try {
+        return await serveGeneratedImage(request, env);
+      } catch (error) {
+        return new Response(error instanceof Error ? error.message : String(error), {
+          status: 500,
+          headers: { "content-type": "text/plain; charset=UTF-8", "cache-control": "no-store", ...corsHeaders },
+        });
       }
     }
     try {
