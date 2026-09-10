@@ -7,7 +7,7 @@ const EDITORIAL_MODEL = "@cf/zai-org/glm-4.7-flash";
 const MEDIA_MODEL = "@cf/zai-org/glm-4.7-flash";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "3.1-structured-tools";
+const VERSION = "3.2-tool-schema-fix";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -126,15 +126,25 @@ async function runStructured(
     messages,
     tools: [
       {
-        name: toolName,
-        description,
-        parameters,
+        type: "function",
+        function: {
+          name: toolName,
+          description,
+          parameters,
+        },
       },
     ],
-    tool_choice: "required",
-    reasoning_effort: "low",
+    tool_choice: {
+      type: "function",
+      function: { name: toolName },
+    },
+    reasoning_effort: null,
+    chat_template_kwargs: {
+      enable_thinking: false,
+      clear_thinking: true,
+    },
     temperature: 0.15,
-    max_completion_tokens: maxCompletionTokens,
+    max_completion_tokens: Math.max(maxCompletionTokens, 1200),
   } as any);
 
   const toolArgs = extractStructuredToolArgs(result, toolName);
