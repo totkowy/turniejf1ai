@@ -8,7 +8,7 @@ const MEDIA_DIRECTION_MODEL = "@cf/zai-org/glm-4.7-flash";
 const MEDIA_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "4.0-news-engine-3";
+const VERSION = "4.1-season-lifecycle";
 const MEDIA_PROMPT_REVISION = "news-v40-news3";
 const MEDIA_GUIDANCE = "5.0";
 
@@ -756,7 +756,7 @@ async function withCache(request: Request, keySuffix: string, producer: () => Pr
 async function editorial(request: Request, env: Env): Promise<Response> {
   if (!authorized(request, env)) return json({ ok: false, error: "Brak autoryzacji F1 AI." }, 401);
   const raw = await request.text();
-  if (!raw || raw.length > 42000) return json({ ok: false, error: "Nieprawidłowy rozmiar danych wejściowych." }, 400);
+  if (!raw || raw.length > 68000) return json({ ok: false, error: "Nieprawidłowy rozmiar danych wejściowych." }, 400);
 
   let body: any;
   try { body = JSON.parse(raw); } catch { return json({ ok: false, error: "Body musi być JSON-em." }, 400); }
@@ -786,7 +786,7 @@ async function editorial(request: Request, env: Env): Promise<Response> {
 
   const canonical = JSON.stringify({ id, season, title, text, round, category, truthEvidence, people, teams, tags, editorialMode, storylineId, storylineTitle, memoryContext, updateType, followUpOf, claimClasses, evidence, scenario, scores });
   const sourceHash = await sha256Hex(canonical);
-  const cached = await withCache(request, `editorial-v40/${sourceHash}`, async () => {
+  const cached = await withCache(request, `editorial-v41/${sourceHash}`, async () => {
     const styleByMode: Record<string, string> = {
       BREAKING: "BREAKING: bardzo zwięźle i pilnie, ale bez clickbaitu, spekulacji i wykrzyknikowej przesady.",
       ANALYSIS: "ANALIZA: możesz wyjaśniać znaczenie dostarczonych faktów, ale każda interpretacja musi wynikać wprost z evidence/scenario i nie może udawać nowego faktu.",
@@ -795,8 +795,14 @@ async function editorial(request: Request, env: Env): Promise<Response> {
       WEEKEND_PREVIEW: "WEEKEND PREVIEW: przedstaw, na co patrzeć przed rundą. Nie przewiduj zwycięzcy i nie dopisuj pogody, toru ani strategii, jeśli nie ma ich w danych.",
       POST_RACE: "POST-RACE: czytelne podsumowanie faktów po rundzie, nacisk na wynik i wpływ na tabelę obecny w evidence.",
       CHAMPIONSHIP_SCENARIO: "SCENARIUSZ: opisuj wyłącznie deterministyczne wyliczenie przekazane w scenario. Zachowaj wszystkie zastrzeżenia, w tym informację o tie-breaku.",
+      SEASON_FINALE: "SEASON FINALE: napisz rozbudowaną retrospektywę całego sezonu. Prowadź chronologiczną narrację tylko na podstawie evidence: walka o tytuł, zwroty, serie, ważne storyline'y, końcowe klasyfikacje. To najważniejszy artykuł sezonu, ale bez dopisywania fikcyjnych wydarzeń.",
+      SEASON_OPENER: "SEASON OPENER: oficjalne otwarcie nowego sezonu. Przedstaw potwierdzony skład, liczbę rund i pierwsze GP wyłącznie jeśli występują w evidence. Ton: nowy rozdział, bez przewidywania wyników.",
       NEWS: "NEWS: neutralny, profesjonalny materiał informacyjny.",
     };
+    const lifecycleFinale = editorialMode === "SEASON_FINALE";
+    const lifecycleOpener = editorialMode === "SEASON_OPENER";
+    const maxParagraphs = lifecycleFinale ? 8 : lifecycleOpener ? 4 : 2;
+    const paragraphLimit = lifecycleFinale ? 760 : lifecycleOpener ? 620 : 520;
     const system = [
       "Jesteś redaktorem oficjalnego newsroomu amatorskiej ligi wyścigowej Turniej F1 2026.",
       "Pracujesz jako ostatnia warstwa językowa po backendowym News Engine 3.0 i kontrakcie Truth Guard.",
@@ -809,11 +815,11 @@ async function editorial(request: Request, env: Env): Promise<Response> {
       "Jeśli updateType to FOLLOW_UP lub UPDATE, napisz materiał jak kontynuację, ale nie zakładaj, że czytelnik zna poprzedni artykuł.",
       styleByMode[editorialMode] || styleByMode.NEWS,
       "Pisz naturalnie po polsku, sportowo i profesjonalnie.",
-      "Zwróć WYŁĄCZNIE poprawny JSON bez markdownu w formacie: {\"headline\":\"...\",\"lead\":\"...\",\"paragraphs\":[\"...\",\"...\"]}.",
-      "headline: maks. 95 znaków; lead: maks. 280 znaków; paragraphs: 1-2 akapity, każdy maks. 520 znaków.",
+      `Zwróć WYŁĄCZNIE poprawny JSON bez markdownu w formacie: {"headline":"...","lead":"...","paragraphs":[...]}.`,
+      `headline: maks. 110 znaków; lead: maks. 340 znaków; paragraphs: 1-${maxParagraphs} akapitów, każdy maks. ${paragraphLimit} znaków.`,
     ].join("\n");
 
-    const evidenceText = clean(JSON.stringify(evidence), 6000);
+    const evidenceText = clean(JSON.stringify(evidence), lifecycleFinale ? 24000 : lifecycleOpener ? 10000 : 6000);
     const scenarioText = scenario ? clean(JSON.stringify(scenario), 4000) : "brak";
     const user = [
       `SEZON: ${season || "brak"}`,
@@ -852,15 +858,15 @@ async function editorial(request: Request, env: Env): Promise<Response> {
         properties: {
           headline: { type: "string" },
           lead: { type: "string" },
-          paragraphs: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 2 },
+          paragraphs: { type: "array", items: { type: "string" }, minItems: 1, maxItems: maxParagraphs },
         },
         required: ["headline", "lead", "paragraphs"],
       },
-      1000,
+      lifecycleFinale ? 3600 : lifecycleOpener ? 1900 : 1000,
     );
-    const headline = clean(parsed?.headline, 95);
-    const lead = clean(parsed?.lead, 280);
-    const paragraphs = stringArray(parsed?.paragraphs, 2, 520);
+    const headline = clean(parsed?.headline, 110);
+    const lead = clean(parsed?.lead, 340);
+    const paragraphs = stringArray(parsed?.paragraphs, maxParagraphs, paragraphLimit);
     if (!headline || !lead || !paragraphs.length) throw new Error("AI zwróciło niepełną redakcję.");
     // Celowo NIE dokładamy memoryContext ani scores do źródła liczb. AI może je widzieć jako metadane,
     // ale nowa liczba w tekście musi pochodzić z aktualnego faktu/evidence/scenario.
