@@ -8,9 +8,9 @@ const MEDIA_DIRECTION_MODEL = "@cf/zai-org/glm-4.7-flash";
 const MEDIA_MODEL = "@cf/black-forest-labs/flux-2-klein-4b";
 const ANALYSIS_MODEL = "@cf/zai-org/glm-4.7-flash";
 const SERVICE = "Turniej F1 2026 AI";
-const VERSION = "3.5-validated-image-pipeline";
-const MEDIA_PROMPT_REVISION = "news-v35";
-const MEDIA_GUIDANCE = "4.0";
+const VERSION = "4.0-news-engine-3";
+const MEDIA_PROMPT_REVISION = "news-v40-news3";
+const MEDIA_GUIDANCE = "5.0";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -685,16 +685,19 @@ async function serveGeneratedImage(request: Request, env: Env): Promise<Response
   let prompts: string[] = [];
   let seedHash = "";
 
-  if (url.pathname.startsWith("/media/news-v35/")) {
-    const match = url.pathname.match(/^\/media\/news-v35\/([a-f0-9]{64})\.jpg$/);
+  if (url.pathname.startsWith("/media/news-v40/") || url.pathname.startsWith("/media/news-v35/")) {
+    const match = url.pathname.match(/^\/media\/(?:news-v40|news-v35)\/([a-f0-9]{64})\.jpg$/);
     if (!match) return new Response("Not found", { status: 404 });
     const encoded = url.searchParams.get("s") || "";
     if (!encoded || encoded.length > 5000) return new Response("Invalid image specification", { status: 400 });
     let spec: NewsPhotoSpec;
     try { spec = JSON.parse(base64UrlDecodeUtf8(encoded)); } catch { return new Response("Invalid image specification", { status: 400 }); }
     const specJson = JSON.stringify(spec);
-    const actualHash = await sha256Hex(`${MEDIA_PROMPT_REVISION}:${specJson}`);
-    if (actualHash !== match[1] || spec.revision !== MEDIA_PROMPT_REVISION) return new Response("Invalid image signature", { status: 400 });
+    const requestedRevision = clean(spec.revision, 80);
+    const isV40 = url.pathname.startsWith("/media/news-v40/");
+    const allowedRevision = isV40 ? requestedRevision === MEDIA_PROMPT_REVISION : requestedRevision === "news-v35";
+    const actualHash = await sha256Hex(`${requestedRevision}:${specJson}`);
+    if (actualHash !== match[1] || !allowedRevision) return new Response("Invalid image signature", { status: 400 });
     prompts = [buildPhotoPromptFromSpec(spec, false), buildPhotoPromptFromSpec(spec, true)];
     seedHash = actualHash;
   } else if (url.pathname.startsWith("/media/news/")) {
@@ -753,7 +756,7 @@ async function withCache(request: Request, keySuffix: string, producer: () => Pr
 async function editorial(request: Request, env: Env): Promise<Response> {
   if (!authorized(request, env)) return json({ ok: false, error: "Brak autoryzacji F1 AI." }, 401);
   const raw = await request.text();
-  if (!raw || raw.length > 30000) return json({ ok: false, error: "Nieprawidłowy rozmiar danych wejściowych." }, 400);
+  if (!raw || raw.length > 42000) return json({ ok: false, error: "Nieprawidłowy rozmiar danych wejściowych." }, 400);
 
   let body: any;
   try { body = JSON.parse(raw); } catch { return json({ ok: false, error: "Body musi być JSON-em." }, 400); }
@@ -764,30 +767,62 @@ async function editorial(request: Request, env: Env): Promise<Response> {
   const text = clean(event.text, 1200);
   const round = clean(event.round, 180);
   const category = clean(event.category, 80);
-  const truthEvidence = clean(event.truthEvidence, 1800);
+  const truthEvidence = clean(event.truthEvidence, 3500);
   const season = clean(body?.season, 40);
   const people = stringArray(event.people, 8, 80);
   const teams = stringArray(event.teams, 8, 80);
-  const tags = stringArray(event.tags, 8, 80);
+  const tags = stringArray(event.tags, 10, 80);
+  const editorialMode = clean(event.editorialMode || "NEWS", 40).toUpperCase();
+  const storylineId = clean(event.storylineId, 120);
+  const storylineTitle = clean(event.storylineTitle, 300);
+  const memoryContext = clean(event.memoryContext, 2200);
+  const updateType = clean(event.updateType || "NEW", 40).toUpperCase();
+  const followUpOf = clean(event.followUpOf, 220);
+  const claimClasses = stringArray(event.claimClasses, 8, 40).map((x) => x.toUpperCase());
+  const evidence = event?.evidence && typeof event.evidence === "object" ? event.evidence : {};
+  const scenario = event?.scenario && typeof event.scenario === "object" ? event.scenario : null;
+  const scores = event?.scores && typeof event.scores === "object" ? event.scores : {};
   if (!id || !title || !text) return json({ ok: false, error: "Brakuje ID, tytułu albo treści newsa." }, 400);
 
-  const canonical = JSON.stringify({ id, season, title, text, round, category, truthEvidence, people, teams, tags });
+  const canonical = JSON.stringify({ id, season, title, text, round, category, truthEvidence, people, teams, tags, editorialMode, storylineId, storylineTitle, memoryContext, updateType, followUpOf, claimClasses, evidence, scenario, scores });
   const sourceHash = await sha256Hex(canonical);
-  const cached = await withCache(request, `editorial/${sourceHash}`, async () => {
+  const cached = await withCache(request, `editorial-v40/${sourceHash}`, async () => {
+    const styleByMode: Record<string, string> = {
+      BREAKING: "BREAKING: bardzo zwięźle i pilnie, ale bez clickbaitu, spekulacji i wykrzyknikowej przesady.",
+      ANALYSIS: "ANALIZA: możesz wyjaśniać znaczenie dostarczonych faktów, ale każda interpretacja musi wynikać wprost z evidence/scenario i nie może udawać nowego faktu.",
+      PADDOCK: "PADDOCK: dopuszczalna jest opinia wyłącznie wtedy, gdy claimClasses zawiera OPINIA; opinię jawnie oznacz jako ocenę/redakcyjny punkt widzenia. Nie twórz plotek.",
+      POWER_RANKING: "POWER RANKING: dynamiczny ton rankingowy, ale nie wymyślaj pozycji ani ocen niewystępujących w wejściu.",
+      WEEKEND_PREVIEW: "WEEKEND PREVIEW: przedstaw, na co patrzeć przed rundą. Nie przewiduj zwycięzcy i nie dopisuj pogody, toru ani strategii, jeśli nie ma ich w danych.",
+      POST_RACE: "POST-RACE: czytelne podsumowanie faktów po rundzie, nacisk na wynik i wpływ na tabelę obecny w evidence.",
+      CHAMPIONSHIP_SCENARIO: "SCENARIUSZ: opisuj wyłącznie deterministyczne wyliczenie przekazane w scenario. Zachowaj wszystkie zastrzeżenia, w tym informację o tie-breaku.",
+      NEWS: "NEWS: neutralny, profesjonalny materiał informacyjny.",
+    };
     const system = [
       "Jesteś redaktorem oficjalnego newsroomu amatorskiej ligi wyścigowej Turniej F1 2026.",
-      "Twoim zadaniem jest WYŁĄCZNIE redakcja tekstu dostarczonego przez News Engine.",
-      "Nie jesteś źródłem faktów i nie wolno Ci dodawać żadnych nowych faktów, nazwisk, zespołów, torów, liczb, przyczyn, przewidywań ani cytatów.",
-      "Wszystkie fakty pochodzą z News Engine i Truth Guard 2.1. Jeśli nie da się czegoś wywnioskować wprost z wejścia, pomiń to.",
-      "Zachowuj sens, liczby, osoby, zespoły, rundę i kierunek relacji dokładnie jak w wejściu.",
-      "Pisz naturalnie po polsku, sportowo i profesjonalnie, ale bez clickbaitu i bez przesady.",
+      "Pracujesz jako ostatnia warstwa językowa po backendowym News Engine 3.0 i kontrakcie Truth Guard.",
+      "Nie jesteś źródłem faktów. Nie wolno Ci dodawać żadnych nowych wyników, liczb, nazwisk, zespołów, torów, przyczyn, cytatów, przewidywań ani zdarzeń.",
+      "FAKT i WYLICZENIE mogą pochodzić wyłącznie z ORYGINALNEGO TYTUŁU/LEADU, DOWODÓW, EVIDENCE lub SCENARIO.",
+      "INTERPRETACJA jest dozwolona tylko, jeśli claimClasses ją dopuszcza, i musi być przedstawiona jako interpretacja, a nie nowy fakt.",
+      "OPINIA jest dozwolona tylko, jeśli claimClasses zawiera OPINIA. Musi być jawnie oznaczona jako opinia/ocena redakcji.",
+      "MEMORY CONTEXT służy wyłącznie do ciągłości narracji i rozpoznania follow-upu. Nie wolno kopiować z niego liczby lub faktu, którego nie ma w bieżących dowodach.",
+      "News Score i jego składowe są metadanymi redakcyjnymi. Nie cytuj ich w artykule.",
+      "Jeśli updateType to FOLLOW_UP lub UPDATE, napisz materiał jak kontynuację, ale nie zakładaj, że czytelnik zna poprzedni artykuł.",
+      styleByMode[editorialMode] || styleByMode.NEWS,
+      "Pisz naturalnie po polsku, sportowo i profesjonalnie.",
       "Zwróć WYŁĄCZNIE poprawny JSON bez markdownu w formacie: {\"headline\":\"...\",\"lead\":\"...\",\"paragraphs\":[\"...\",\"...\"]}.",
       "headline: maks. 95 znaków; lead: maks. 280 znaków; paragraphs: 1-2 akapity, każdy maks. 520 znaków.",
     ].join("\n");
 
+    const evidenceText = clean(JSON.stringify(evidence), 6000);
+    const scenarioText = scenario ? clean(JSON.stringify(scenario), 4000) : "brak";
     const user = [
       `SEZON: ${season || "brak"}`,
       `ID: ${id}`,
+      `TRYB REDAKCYJNY: ${editorialMode}`,
+      `UPDATE TYPE: ${updateType}`,
+      `FOLLOW-UP OF: ${followUpOf || "brak"}`,
+      `STORYLINE: ${storylineTitle || "brak"} (${storylineId || "brak ID"})`,
+      `CLAIM CLASSES: ${claimClasses.join(", ") || "FAKT"}`,
       `RUNDA: ${round || "brak"}`,
       `KATEGORIA: ${category || "news"}`,
       `OSOBY DOZWOLONE: ${people.join(", ") || "brak"}`,
@@ -796,7 +831,11 @@ async function editorial(request: Request, env: Env): Promise<Response> {
       `ORYGINALNY TYTUŁ: ${title}`,
       `ORYGINALNY LEAD: ${text}`,
       `DOWODY TRUTH GUARD: ${truthEvidence || "brak dodatkowych dowodów"}`,
-      "Przeredaguj ten materiał. Nie dopisuj niczego spoza powyższych danych.",
+      `EVIDENCE NEWS ENGINE 3.0: ${evidenceText || "brak"}`,
+      `SCENARIO DETERMINISTYCZNE: ${scenarioText}`,
+      `MEMORY CONTEXT (tylko ciągłość, nie nowe fakty): ${memoryContext || "brak"}`,
+      `METADANE SCORE (nie cytuj): ${clean(JSON.stringify(scores), 800)}`,
+      "Przeredaguj ten materiał zgodnie z trybem. Nie dopisuj niczego spoza bieżących źródeł faktów.",
     ].join("\n");
 
     const parsed = await runStructured(
@@ -807,7 +846,7 @@ async function editorial(request: Request, env: Env): Promise<Response> {
         { role: "user", content: user + "\nZakończ odpowiedź wywołaniem narzędzia submitEditorial." },
       ],
       "submitEditorial",
-      "Zwróć gotową, bezpieczną redakcję newsa opartą wyłącznie na dostarczonych faktach.",
+      "Zwróć gotową, bezpieczną redakcję newsa opartą wyłącznie na faktach i wyliczeniach zatwierdzonych przez News Engine 3.0.",
       {
         type: "object",
         properties: {
@@ -817,15 +856,17 @@ async function editorial(request: Request, env: Env): Promise<Response> {
         },
         required: ["headline", "lead", "paragraphs"],
       },
-      900,
+      1000,
     );
     const headline = clean(parsed?.headline, 95);
     const lead = clean(parsed?.lead, 280);
     const paragraphs = stringArray(parsed?.paragraphs, 2, 520);
     if (!headline || !lead || !paragraphs.length) throw new Error("AI zwróciło niepełną redakcję.");
-    const sourceForNumbers = [season, round, title, text, truthEvidence, people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
+    // Celowo NIE dokładamy memoryContext ani scores do źródła liczb. AI może je widzieć jako metadane,
+    // ale nowa liczba w tekście musi pochodzić z aktualnego faktu/evidence/scenario.
+    const sourceForNumbers = [season, round, title, text, truthEvidence, JSON.stringify(evidence), JSON.stringify(scenario || {}), people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
     const outputForNumbers = [headline, lead, ...paragraphs].join(" ");
-    if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error("AI próbowało dodać liczbę, której nie było w danych źródłowych.");
+    if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error("AI próbowało dodać liczbę, której nie było w bieżących danych źródłowych.");
     if (/https?:\/\//i.test(outputForNumbers)) throw new Error("AI zwróciło niedozwolony adres URL.");
 
     return {
@@ -838,9 +879,11 @@ async function editorial(request: Request, env: Env): Promise<Response> {
         headline,
         lead,
         paragraphs,
-        mode: "AI_REDAKCJA",
-        factsVerifiedBy: "Truth Guard 2.1",
-        source: "News Engine",
+        mode: editorialMode,
+        updateType,
+        storylineId,
+        factsVerifiedBy: "News Engine 3.0 / Truth Guard contract",
+        source: "News Engine 3.0",
       },
     };
   });
@@ -877,16 +920,22 @@ async function media(request: Request, env: Env): Promise<Response> {
   const driverTeams: DriverTeamPair[] = Array.isArray(event.driverTeams)
     ? event.driverTeams.map((x: any) => ({ name: clean(x?.name, 80), team: clean(x?.team, 80) })).filter((x: DriverTeamPair) => x.name && x.team).slice(0, 6)
     : [];
-  const tags = stringArray(event.tags, 8, 60);
+  const tags = stringArray(event.tags, 10, 60);
+  const editorialMode = clean(event.editorialMode || "NEWS", 40).toUpperCase();
+  const storylineTitle = clean(event.storylineTitle, 300);
+  const memoryContext = clean(event.memoryContext, 1800);
+  const scenario = event?.scenario && typeof event.scenario === "object" ? event.scenario : null;
+  const scores = event?.scores && typeof event.scores === "object" ? event.scores : {};
   if (!id || !title || !text) return json({ ok: false, error: "Brakuje ID, tytułu albo treści newsa." }, 400);
 
-  const canonical = JSON.stringify({ id, season, title, text, round, category, family, truthEvidence, people, teams, driverTeams, tags, mediaPromptRevision: MEDIA_PROMPT_REVISION });
+  const canonical = JSON.stringify({ id, season, title, text, round, category, family, truthEvidence, people, teams, driverTeams, tags, editorialMode, storylineTitle, memoryContext, scenario, scores, mediaPromptRevision: MEDIA_PROMPT_REVISION });
   const sourceHash = await sha256Hex(canonical);
-  const cached = await withCache(request, `media-v35/${sourceHash}`, async () => {
+  const cached = await withCache(request, `media-v40/${sourceHash}`, async () => {
     const system = [
       "Jesteś dyrektorem wizualnym profesjonalnego newsroomu ligi Turniej F1 2026.",
       "Nie ustalasz faktów. Nie dodawaj żadnych nowych nazw, zespołów, torów, wyników ani liczb.",
-      "Masz wybrać sensowny typ realistycznej fotografii, który odpowiada znaczeniu newsa i liczbie bohaterów.",
+      "Masz wybrać sensowny typ realistycznej fotografii, który odpowiada znaczeniu newsa, trybowi redakcyjnemu i liczbie bohaterów.",
+      "Storyline, memoryContext i scores są kontekstem kompozycyjnym. Nie są zgodą na dodawanie faktów, tekstu, symboli punktowych ani fikcyjnych zdarzeń.",
       "Dla dwóch rywali wybieraj driver_rivalry albo two_car_duel. Dla jednego kierowcy wybieraj single_driver albo single_car. Dla newsa o jednym zespole bez wskazanego kierowcy możesz wybrać team_cars.",
       "driver_rivalry oznacza dokładnie dwóch kierowców na pierwszym planie, najlepiej od tyłu/3-4 tyłem w paddocku. two_car_duel oznacza dokładnie dwa osobne bolidy i po jednym kierowcy w każdym kokpicie.",
       "Preferuj kierowców dla historii o mistrzostwie, liderze, presji, formie i narracji osobowej. Preferuj bolidy dla bezpośredniej walki, różnicy punktowej, ataku, pojedynku i sceny torowej. Zachowuj różnorodność między newsami.",
@@ -900,12 +949,17 @@ async function media(request: Request, env: Env): Promise<Response> {
       `LEAD: ${text}`,
       `RUNDA: ${round || 'brak'}`,
       `KATEGORIA: ${category || 'news'}`,
+      `TRYB REDAKCYJNY: ${editorialMode}`,
+      `STORYLINE: ${storylineTitle || 'brak'}`,
       `RODZINA NEWSA: ${family || 'brak'}`,
       `OSOBY: ${people.join(', ') || 'brak'}`,
       `ZESPOŁY: ${teams.join(', ') || 'brak'}`,
       `PRZYPISANIE KIEROWCA→ZESPÓŁ: ${driverTeams.map(x=>`${x.name}→${x.team}`).join(' | ') || 'brak'}`,
       `TAGI: ${tags.join(', ') || 'brak'}`,
       `DOWODY: ${truthEvidence || 'brak'}`,
+      `SCENARIUSZ: ${scenario ? clean(JSON.stringify(scenario), 2200) : 'brak'}`,
+      `MEMORY (tylko ciągłość wizualna): ${memoryContext || 'brak'}`,
+      `NEWS SCORE (tylko priorytet kompozycyjny, nie pokazuj jako tekst): ${clean(JSON.stringify(scores), 600)}`,
       'Zaproponuj wyłącznie krótki art direction do wizualu newsowego bez dopisywania faktów.',
     ].join("\n");
 
@@ -936,14 +990,14 @@ async function media(request: Request, env: Env): Promise<Response> {
     const focus = stringArray(parsed?.focus, 2, 34);
     const tone = clean(parsed?.tone || 'neutral', 20).toLowerCase();
     const sceneType = resolveSceneType({ title, text, category, family, people, teams, requested: parsed?.sceneType });
-    const sourceForNumbers = [season, title, text, round, category, truthEvidence, people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
+    const sourceForNumbers = [season, title, text, round, category, truthEvidence, JSON.stringify(scenario || {}), people.join(" "), teams.join(" "), tags.join(" ")].join(" ");
     const outputForNumbers = [strapline, focusTitle, ...focus].join(" ");
     if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error("AI visual próbowało dodać nową liczbę.");
     const photoSpec = buildNewsPhotoSpec({ sceneType, teams, people, driverTeams, tone });
     const specJson = JSON.stringify(photoSpec);
     const imageHash = await sha256Hex(`${MEDIA_PROMPT_REVISION}:${specJson}`);
     const origin = new URL(request.url).origin;
-    const imageDataUri = `${origin}/media/news-v35/${imageHash}.jpg?s=${encodeURIComponent(base64UrlEncodeUtf8(specJson))}`;
+    const imageDataUri = `${origin}/media/news-v40/${imageHash}.jpg?s=${encodeURIComponent(base64UrlEncodeUtf8(specJson))}`;
 
     // V3.5: READY dopiero po faktycznym wygenerowaniu i zapisaniu poprawnego obrazu do cache.
     // To naprawia sytuację, w której arkusz pokazywał READY, a dopiero przeglądarka trafiała na 3030/flagged.
@@ -976,8 +1030,8 @@ async function media(request: Request, env: Env): Promise<Response> {
         sceneType,
         promptRevision: MEDIA_PROMPT_REVISION,
         label: 'AI FOTO • wygenerowane przez AI',
-        factsVerifiedBy: 'Truth Guard 2.1',
-        source: 'News Engine',
+        factsVerifiedBy: 'News Engine 3.0 / Truth Guard contract',
+        source: 'News Engine 3.0',
         directionModel: MEDIA_DIRECTION_MODEL,
         imageModel: MEDIA_MODEL,
         imageValidated: true,
@@ -1000,7 +1054,7 @@ async function media(request: Request, env: Env): Promise<Response> {
 async function analysis(request: Request, env: Env): Promise<Response> {
   if (!authorized(request, env)) return json({ ok: false, error: "Brak autoryzacji F1 AI." }, 401);
   const raw = await request.text();
-  if (!raw || raw.length > 28000) return json({ ok: false, error: "Nieprawidłowy rozmiar danych wejściowych." }, 400);
+  if (!raw || raw.length > 36000) return json({ ok: false, error: "Nieprawidłowy rozmiar danych wejściowych." }, 400);
   let body: any;
   try { body = JSON.parse(raw); } catch { return json({ ok: false, error: "Body musi być JSON-em." }, 400); }
 
@@ -1017,6 +1071,13 @@ async function analysis(request: Request, env: Env): Promise<Response> {
   const constructorLeader = snapshot?.constructorLeader || {};
   const constructorBattle = snapshot?.constructorBattle || {};
   const topDrivers = Array.isArray(snapshot?.topDrivers) ? snapshot.topDrivers : [];
+  const scenarios = Array.isArray(body?.scenarios) ? body.scenarios.slice(0, 6).map((x: any) => ({
+    type: clean(x?.type, 60), driver: clean(x?.driver, 80), leader: clean(x?.leader, 80), challenger: clean(x?.challenger, 80), currentGap: Number(x?.currentGap ?? 0),
+    neededSwing: Number(x?.neededSwing ?? 0), maxSingleRaceSwing: Number(x?.maxSingleRaceSwing ?? 0), possibleOnPoints: Boolean(x?.possibleOnPoints),
+    mathematicallyAlive: x?.mathematicallyAlive === undefined ? undefined : Boolean(x?.mathematicallyAlive), maxRemainingSwing: Number(x?.maxRemainingSwing ?? 0),
+    requiredGapAfterNext: Number(x?.requiredGapAfterNext ?? 0), neededGainNextRace: Number(x?.neededGainNextRace ?? 0), remainingAfterNext: Number(x?.remainingAfterNext ?? 0), maxPointsAfterNext: Number(x?.maxPointsAfterNext ?? 0),
+    nextRound: Number(x?.nextRound ?? 0), nextRace: clean(x?.nextRace, 120), tieBreakerIncluded: Boolean(x?.tieBreakerIncluded), text: clean(x?.text, 600),
+  })) : [];
   const sourceObject = {
     season, played, remaining,
     leader: { name: clean(leader.name, 60), points: Number(leader.points ?? 0), wins: Number(leader.wins ?? 0), podiums: Number(leader.podiums ?? 0) },
@@ -1028,19 +1089,27 @@ async function analysis(request: Request, env: Env): Promise<Response> {
     constructorLeader: { team: clean(constructorLeader.team, 60), points: Number(constructorLeader.points ?? 0) },
     constructorBattle: { a: clean(constructorBattle.a, 60), b: clean(constructorBattle.b, 60), gap: Number(constructorBattle.gap ?? 0) },
     topDrivers: topDrivers.slice(0, 5).map((x: any) => ({ name: clean(x?.name, 60), points: Number(x?.points ?? 0), gap: Number(x?.gap ?? 0) })),
+    scenarios,
   };
   if (!sourceObject.leader.name) return json({ ok: false, error: "Brak danych lidera do analizy AI." }, 400);
 
   const sourceHash = await sha256Hex(JSON.stringify(sourceObject));
-  const cached = await withCache(request, `analysis/${sourceHash}`, async () => {
+  const cached = await withCache(request, `analysis-v40/${sourceHash}`, async () => {
     const system = [
-      'Tworzysz komentarz analityczny do ligi Turniej F1 2026.',
+      'Tworzysz komentarz analityczny do ligi Turniej F1 2026 po News Engine 3.0.',
       'Nie dodawaj żadnych nowych faktów, nazw, liczb ani przewidywań nieobecnych w danych wejściowych.',
+      'Sekcja SCENARIUSZE zawiera deterministyczne wyliczenia backendu. Możesz je wyjaśnić, ale nie rozszerzaj ich o niewyliczone kombinacje.',
+      'Jeżeli scenariusz mówi tieBreakerIncluded=false, nie twierdź, że rozstrzyga remis punktowy.',
+      'Wyraźnie oddzielaj fakt/wyliczenie od interpretacji. Nie przedstawiaj prognozy jako faktu.',
       'Analiza ma być krótka, konkretna, sportowa i profesjonalna.',
       'Zwróć WYŁĄCZNIE JSON bez markdownu.',
       'Format: {"headline":"...","summary":"...","bullets":["...","...","..."],"titleFight":"...","momentum":"...","constructors":"..."}.',
       'headline max 90, summary max 260, każde bullet/titleFight/momentum/constructors max 180 znaków.',
     ].join('\n');
+    const scenarioLines=scenarios.map((x:any)=>{
+      if(x.type==='TITLE_CLINCH_THRESHOLD')return `${x.type}: ${x.text} | gap=${x.currentGap} | requiredGapAfterNext=${x.requiredGapAfterNext} | neededGainNextRace=${x.neededGainNextRace} | remainingAfterNext=${x.remainingAfterNext} | tieBreakerIncluded=${x.tieBreakerIncluded}`;
+      return `${x.type}: ${x.text} | gap=${x.currentGap} | neededSwing=${x.neededSwing} | max=${x.maxSingleRaceSwing} | mathematicallyAlive=${x.mathematicallyAlive} | tieBreakerIncluded=${x.tieBreakerIncluded}`;
+    }).join(' || ');
     const user = [
       `SEZON: ${season}`,
       `ROZEGRANE GP: ${played}`,
@@ -1053,7 +1122,8 @@ async function analysis(request: Request, env: Env): Promise<Response> {
       `LIDER KONSTRUKTORÓW: ${sourceObject.constructorLeader.team || 'brak'} / ${sourceObject.constructorLeader.points} pkt`,
       `NAJBLIŻSZA WALKA KONSTRUKTORÓW: ${sourceObject.constructorBattle.a || 'brak'} vs ${sourceObject.constructorBattle.b || 'brak'} / ${sourceObject.constructorBattle.gap} pkt`,
       `TOP 5: ${sourceObject.topDrivers.map((x) => `${x.name} ${x.points} pkt strata ${x.gap}`).join(' | ')}`,
-      'Napisz zwięzły komentarz analityczny oparty tylko na tych danych.',
+      `SCENARIUSZE BACKENDU: ${scenarioLines || 'brak'}`,
+      'Napisz zwięzły komentarz analityczny oparty tylko na tych danych i wyliczeniach.',
     ].join('\n');
 
     const parsed = await runStructured(
@@ -1064,7 +1134,7 @@ async function analysis(request: Request, env: Env): Promise<Response> {
         { role: 'user', content: user + '\nZakończ odpowiedź wywołaniem narzędzia submitAnalysis.' },
       ],
       'submitAnalysis',
-      'Zwróć komentarz analityczny oparty wyłącznie na dostarczonych danych sezonu.',
+      'Zwróć komentarz analityczny oparty wyłącznie na danych sezonu i deterministycznych scenariuszach News Engine 3.0.',
       {
         type: 'object',
         properties: {
@@ -1077,7 +1147,7 @@ async function analysis(request: Request, env: Env): Promise<Response> {
         },
         required: ['headline', 'summary', 'bullets', 'titleFight', 'momentum', 'constructors'],
       },
-      850,
+      900,
     );
     const headline = clean(parsed?.headline, 90);
     const summary = clean(parsed?.summary, 260);
@@ -1085,9 +1155,7 @@ async function analysis(request: Request, env: Env): Promise<Response> {
     const titleFight = clean(parsed?.titleFight, 180);
     const momentum = clean(parsed?.momentum, 180);
     const constructors = clean(parsed?.constructors, 180);
-    if (!headline || !summary || bullets.length < 2 || !titleFight || !momentum || !constructors) {
-      throw new Error('AI zwróciło niepełną analizę.');
-    }
+    if (!headline || !summary || bullets.length < 2 || !titleFight || !momentum || !constructors) throw new Error('AI zwróciło niepełną analizę.');
     const sourceForNumbers = JSON.stringify(sourceObject);
     const outputForNumbers = [headline, summary, ...bullets, titleFight, momentum, constructors].join(' ');
     if (!outputUsesOnlySourceNumbers(sourceForNumbers, outputForNumbers)) throw new Error('AI analiza próbowała dodać nową liczbę.');
@@ -1104,8 +1172,8 @@ async function analysis(request: Request, env: Env): Promise<Response> {
         titleFight,
         momentum,
         constructors,
-        label: 'AI ANALIZA • wsparta przez AI',
-        factsVerifiedBy: 'Dane ligi + News Engine + Truth Guard 2.1',
+        label: 'AI ANALIZA • NEWS ENGINE 3.0',
+        factsVerifiedBy: 'Dane ligi + deterministyczne scenariusze + News Engine 3.0 / Truth Guard contract',
       },
     };
   });
@@ -1138,7 +1206,7 @@ export default {
         mediaGuidance: MEDIA_GUIDANCE,
         analysisModel: ANALYSIS_MODEL,
         aiBinding: Boolean(env.AI),
-        endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis','/media/news-v35/:hash.jpg','/media/news/:hash.jpg','/media/track-v1/:key.jpg'],
+        endpoints: ['/api/test','/api/editorial','/api/media','/api/analysis','/media/news-v40/:hash.jpg','/media/news-v35/:hash.jpg','/media/news/:hash.jpg','/media/track-v1/:key.jpg'],
       });
     }
     if (request.method === 'POST' && url.pathname === '/api/test') {
@@ -1156,7 +1224,7 @@ export default {
         return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500);
       }
     }
-    if (request.method === 'GET' && (url.pathname.startsWith('/media/news-v35/') || url.pathname.startsWith('/media/news/') || url.pathname.startsWith('/media/track-v1/'))) {
+    if (request.method === 'GET' && (url.pathname.startsWith('/media/news-v40/') || url.pathname.startsWith('/media/news-v35/') || url.pathname.startsWith('/media/news/') || url.pathname.startsWith('/media/track-v1/'))) {
       try {
         return await serveGeneratedImage(request, env);
       } catch (error) {
